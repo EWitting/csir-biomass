@@ -170,3 +170,5 @@ outputs
 tm
 
 data/processed
+
+data/raw
