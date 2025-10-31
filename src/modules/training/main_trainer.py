@@ -18,6 +18,7 @@ from epochlib.data import Data
 from src.modules.logging.logger import Logger
 from src.modules.training.augmentation import Augmentation
 from src.modules.training.dataset import AugmentedDataset
+from src.scoring.scorer import Scorer
 
 
 @dataclass
@@ -29,6 +30,7 @@ class MainTrainer(TorchTrainer, Logger):
     gradient_accumulation_steps: int = 1
     tta: bool = field(default=False, init=True, repr=False, compare=False)
     nominal_batch_size: int = field(default=16, init=True, repr=False, compare=False)
+    scorer: Optional[Scorer] = None  # For exact validation metric computation
 
     def create_datasets(
         self,
@@ -166,6 +168,68 @@ class MainTrainer(TorchTrainer, Logger):
         gc.collect()
 
         return sum(losses) / len(losses)
+
+    def val_one_epoch(
+        self,
+        dataloader: DataLoader[tuple[Tensor, ...]],
+        desc: str,
+    ) -> float:
+        """Compute validation loss and exact metric for one epoch.
+
+        Accumulates all predictions and labels to compute exact competition metric.
+
+        :param dataloader: Dataloader for the validation data.
+        :param desc: Description for the tqdm progress bar.
+        :return: Competition metric score (or average loss if no scorer provided)
+        """
+        losses = []
+        all_preds = []
+        all_labels = []
+        
+        self.model.eval()
+        pbar = tqdm(dataloader, unit="batch")
+        
+        with torch.no_grad():
+            for batch in pbar:
+                X_batch, y_batch = batch
+
+                X_batch = batch_to_device(X_batch, self.x_tensor_type, self.device)
+                y_batch = batch_to_device(y_batch, self.y_tensor_type, self.device)
+
+                # Forward pass
+                y_pred = self.model(X_batch)
+                loss = self.criterion(y_pred, y_batch)
+
+                # Accumulate for metric computation
+                losses.append(loss.item())
+                all_preds.append(y_pred.cpu())
+                all_labels.append(y_batch.cpu())
+                
+                # Update progress bar with average loss
+                avg_loss = sum(losses) / len(losses)
+                pbar.set_description(desc=desc)
+                pbar.set_postfix(loss=avg_loss)
+        
+        avg_loss = sum(losses) / len(losses)
+        
+        # Compute exact metric if scorer is provided
+        if self.scorer is not None:
+            all_preds = torch.cat(all_preds, dim=0).numpy()
+            all_labels = torch.cat(all_labels, dim=0).numpy()
+            
+            # Compute the exact competition metric
+            metric_score = self.scorer(all_labels, all_preds)
+            
+            # Log metric to wandb
+            self.log_to_external(
+                message={
+                    self.wrap_log(f"Validation/{self.scorer.name}"): metric_score,
+                    self.wrap_log(f"Validation/loss_vs_metric_diff"): avg_loss - (1 - metric_score),
+                }
+            )
+        
+        # Always return the loss for early stopping and tracking
+        return avg_loss
 
     def predict_on_loader(
         self,
