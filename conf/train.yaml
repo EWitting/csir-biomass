@@ -1,7 +1,7 @@
 defaults:
   - base_train
   - hydra/logging
-  - model: mlp # Add models or ensembles
+  - model: biomass_base # Biomass prediction model
   - wandb: train
 
 ###############
@@ -12,15 +12,16 @@ defaults:
 processed_path: data/processed
 raw_path: data/raw
 cache_path: data/cache
-data_path: data/raw/train_data/iris.csv
+data_path: data/raw/train.csv
 
 splitter:
   _target_: sklearn.model_selection.KFold
-  n_splits: 2 # Set to 0 if you want train full.
-  shuffle: false
+  n_splits: 5  # 5-fold gives 80-20 train-test split (using first fold)
+  shuffle: true
+  random_state: 42
 
 scorer:
-  _target_: src.scoring.accuracy.Accuracy
-  name: accuracy
+  _target_: src.scoring.weighted_r2.WeightedR2
+  name: weighted_r2
 
 allow_multiple_instances: true

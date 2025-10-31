@@ -27,7 +27,7 @@ def setup_wandb(
     """
     logger.debug("Initializing Weights & Biases")
 
-    project_name = "???"
+    project_name = "csir-biomass"
 
     if project_name == "???":
         raise ValueError("Please set the project name in setup_wandb.py")

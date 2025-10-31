@@ -6,52 +6,104 @@
 from pathlib import Path
 from typing import Any 
 import pandas as pd
+import numpy as np
 
 from src.utils.logger import logger
 
 
-
-def setup_train_x_data(path: Path) -> Any:  # noqa: ANN401
+def setup_train_x_data(path: Path) -> np.ndarray:
     """Create train x data for pipeline.
+    
+    Returns image file paths as strings. Images are loaded during training for memory efficiency.
+    Each unique image appears once.
 
-    :param path: Usually raw path is a parameter
-    :return: x data
+    :param path: Path to train.csv
+    :return: Array of image paths (n_images,) with dtype object
     """
-    logger.info("This method [setup_train_x_data] has not been changed yet, remove log statement when implemented")
+    logger.info("Loading training data from train.csv")
+    
+    df = pd.read_csv(path)
+    
+    # Get unique images (each image has 5 rows for 5 targets)
+    unique_images = df[['image_path']].drop_duplicates().reset_index(drop=True)
+    
+    # Convert to full paths - use dtype=object for string arrays
+    raw_path = path.parent
+    image_paths = unique_images['image_path'].apply(lambda x: str(raw_path / x)).to_numpy(dtype=object)
+    
+    logger.info(f"Loaded {len(image_paths)} unique training images")
+    
+    return image_paths
 
-    train_x_data = pd.read_csv(path)
-    train_x_data = train_x_data.drop(columns=["species"]).to_numpy()
 
-    return train_x_data
-
-
-def setup_train_y_data(path: Path) -> Any:  # noqa: ANN401
+def setup_train_y_data(path: Path) -> np.ndarray:
     """Create train y data for pipeline.
+    
+    Returns targets in shape (n_images, 5) for the 5 biomass components:
+    [Dry_Clover_g, Dry_Dead_g, Dry_Green_g, GDM_g, Dry_Total_g]
 
-    :param path: Usually raw path is a parameter
-    :return: y data
+    :param path: Path to train.csv
+    :return: Target array (n_images, 5)
     """
-    logger.info("This method [setup_train_y_data] has not been changed yet, remove log statement when implemented")
+    logger.info("Loading target data from train.csv")
+    
+    df = pd.read_csv(path)
+    
+    # Target order (alphabetical for consistency)
+    target_names = ['Dry_Clover_g', 'Dry_Dead_g', 'Dry_Green_g', 'GDM_g', 'Dry_Total_g']
+    
+    # Group by image and pivot to get all 5 targets per image
+    targets_df = df.pivot_table(
+        index='image_path',
+        columns='target_name',
+        values='target',
+        aggfunc='first'
+    )
+    
+    # Ensure consistent ordering
+    targets = targets_df[target_names].to_numpy(dtype=np.float32)
+    
+    logger.info(f"Loaded targets with shape {targets.shape}")
+    logger.info(f"Target order: {target_names}")
+    
+    return targets
 
-    train_y_data = pd.read_csv(path)
-    train_y_data = train_y_data["species"]
-    train_y_data = pd.get_dummies(train_y_data).astype(int).to_numpy()
 
-    return train_y_data
-
-
-def setup_inference_data() -> Any:  # noqa: ANN401
+def setup_inference_data(path: Path) -> np.ndarray:
     """Create data for inference with pipeline.
+    
+    Returns image file paths for test set.
 
-    :param path: Usually raw path is a parameter
-    :return: Inference data
+    :param path: Path to test.csv
+    :return: Array of image paths
     """
-    raise NotImplementedError("Setup inference data is competition specific, implement within competition repository, it might be the same as setup_train_x")
+    logger.info("Loading test data from test.csv")
+    
+    df = pd.read_csv(path)
+    
+    # Get unique images
+    unique_images = df[['image_path']].drop_duplicates().reset_index(drop=True)
+    
+    # Convert to full paths
+    raw_path = path.parent
+    image_paths = unique_images['image_path'].apply(lambda x: str(raw_path / x)).to_numpy()
+    
+    logger.info(f"Loaded {len(image_paths)} test images")
+    
+    return image_paths
 
 
-def setup_splitter_data() -> Any:  # noqa: ANN401
+def setup_splitter_data(path: Path) -> np.ndarray:
     """Create data for splitter.
+    
+    Returns image paths for stratification/grouping in cross-validation.
 
-    :return: Splitter data
+    :param path: Path to train.csv
+    :return: Array of image identifiers for stratification
     """
-    raise NotImplementedError("Setup splitter data is competition specific, implement within competition repository")
+    df = pd.read_csv(path)
+    
+    # Return unique image paths (one per image)
+    unique_images = df[['image_path']].drop_duplicates().reset_index(drop=True)
+    
+    return unique_images['image_path'].to_numpy()

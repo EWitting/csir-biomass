@@ -2,26 +2,26 @@ This codebase is set up specifically for the workflow of (Kaggle) ML competition
 Pipelines are structured using Hydra instantiate and follow a specific pattern. Some parts are disabled during inference on Kaggle.
 Wandb is used for logging and hyperparameter tuning.
 
-# Design philosophy:
+# Design philosophy (IMPORTANT):
 - Minimize python code, and don't use python code to parse configurations. Define classes and objects that can be instantiated through the configuration, and aim to directly support libraries. E.g.:
 - Use @dataclass to minimize boilerplate code.
 
 WRONG:
 ```python
-class MyModel:
-    def __init__(self, activation: str, ...):
-        if self.activation == "relu":
-            self.activation_fn = torch.nn.ReLU()
-        elif self.activation == "sigmoid":
-            self.activation_fn = torch.nn.Sigmoid()
-        elif self.activation == "tanh":
-            self.activation_fn = torch.nn.Tanh()
+class Trainer:
+    def __init__(self, loss: str, ...):
+        if self.loss == "mse":
+            self.loss_fn = torch.nn.MSELoss()
+        elif self.loss == "bce":
+            self.loss_fn = torch.nn.BCELoss()
+        elif self.loss == "cross_entropy":
+            self.loss_fn = torch.nn.CrossEntropyLoss()
         else:
-            raise ValueError(f"Invalid activation: {self.activation}")
+            raise ValueError(f"Invalid loss: {self.loss}")
 ```
 ```yaml
-model: MyModel
-  activation: "relu"
+model: Trainer
+  loss: "mse"
   ...
 ```
 
@@ -29,18 +29,18 @@ model: MyModel
 CORRECT:
 ```python
 @dataclass
-class MyModel:
-    activation: nn.Module
+class Trainer:
+    loss: nn.Module
 
     def __post_init__(self):
         super().__init__()
 ```
 
 ```yaml
-model:
-  _target_: src.modules.training.models.my_model.MyModel
-  activation:
-    _target_: torch.nn.ReLU
+  model:
+    _target_: src.modules.training.models.trainer.Trainer
+    loss:
+      _target_: torch.nn.MSELoss
 ```
 
 # For a new competion:
@@ -53,6 +53,8 @@ model:
 - depending on the competition. you might want some operations to happen to data during training, and not preprocessed, e.g. random data augmentation. A common pattern is to create a custom dataset class that applies a list of augmentations of the appropriate data type. Pass this list to the trainer in the config, and extend/override the trainer class to use this dataset format.
 - create a configuration file that describes the pipeline. see below.
 - select the model in train.yaml (or cv.yaml), and run with commands as below.
+- when framework succesfully created. enable wandb in conf/wandb/train.yaml to start logging runs
+
 # Hydra configuration:
 A model pipeline is defined in a single yaml file. Which includes training parameters. Instantiate uses the _target_ pattern. Note that segmentation_models_pytorch is used directly. No python file is created for this model. Note also the partial. This is necessary for objects that need to be instantiated at runtime, e.g. the optimizer based on model parameters. Example:
 ```yaml	
@@ -117,10 +119,13 @@ train_sys: (fit) transforms anything that needs access to both x and y. Usually 
 pred_sys: (transform) transforms the predictions made by the model.
 label_sys: (transform) transforms the labels after being returned by the model. (mainly relevant if the final scoring function is significantly different than the one used during training)
 
-# UV Notes
-Update the project description, python version etc. accordingly.
-Use the following pattern in pyproject.toml to specify PyTorch GPU sources.
+There are examples for the different parts of the pipeline, for example example_transformation_block.py and example_training_block.py.
 
+# UV Notes
+Update the project description, python version etc. accordingly. DO NOT ADD PACKAGES DIRECTLY TO THE FILE AND GUESS VERSION NUMBERS. Run `uv add` instead.
+
+
+Only exception for manual dependency adding, is to use the following pattern in pyproject.toml to specify PyTorch GPU sources. 
 ```toml	
 [tool.uv.sources]
 torch = [
@@ -152,6 +157,14 @@ Each file has a corresponding .yaml file in the conf/ directory. This specifies 
 Use `uv run train` to train the model etc. Hydra allows command line arguments to switch models, e.g. `uv run train model=mlp`. LET THE USER RUN THE COMMAND THEMSELVES for long training runs, so they can do it in their own large terminal window instead of the integrated agent terminal.
 
 Code and models are uploaded to Kaggle through the API with the submission/manage_datasets.py utility scripts. The user needs to fill this in their own terminal, as they are prompted for the API key and other information. This will then be used for submission.
+
+# Logging
+When inheriting from VerboseTransformationBlock or VerboseTrainingBlock, the logger will be available as:
+- `self.log_to_terminal(message: str)`
+- `self.log_to_debug(message: str)`
+- `self.log_to_warning(message: str)`
+- `self.log_to_external(message: dict[str, Any], **kwargs: Any)` -> for wandb logging or custom plots
+- `self.external_define_metric(metric: str, metric_type: str)` -> for defining metrics in wandb
 
 # Caching
 By default, the result of x_sys and y_sys is cached. This uses epochlib functionality. The data format is specified in train.py and cv.py.
