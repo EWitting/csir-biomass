@@ -1,4 +1,5 @@
 """Image loading and preprocessing transformation."""
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -9,23 +10,23 @@ from tqdm import tqdm
 from src.modules.transformation.verbose_transformation_block import VerboseTransformationBlock
 
 
+@dataclass
 class ImageLoader(VerboseTransformationBlock):
     """Load and preprocess images for training.
     
     Converts image paths to tensors in [0, 1] range with resizing.
     Normalization is handled in the dataset/augmentation pipeline.
+    
+    :param size: Target size for images. If preserve_aspect_ratio=False, this is the 
+                 target width and height. If preserve_aspect_ratio=True, this is the 
+                 size of the shortest edge.
+    :param preserve_aspect_ratio: If True, preserve aspect ratio and resize so that 
+                                   the shortest edge is `size`. If False, resize to 
+                                   square (size x size).
     """
     
-    def __init__(
-        self,
-        size: int = 224,
-    ) -> None:
-        """Initialize the image loader.
-        
-        :param size: Target size for images
-        """
-        super().__init__()
-        self.size = size
+    size: int = 224
+    preserve_aspect_ratio: bool = False
     
     def custom_fit(self, x: npt.NDArray[np.str_], y: Optional[npt.NDArray] = None) -> None:
         """Fit the transformer.
@@ -33,7 +34,8 @@ class ImageLoader(VerboseTransformationBlock):
         :param x: Array of image file paths
         :param y: Ignored
         """
-        self.log_to_terminal(f"ImageLoader ready to process {len(x)} images (output range: [0, 1])")
+        resize_mode = "shortest edge" if self.preserve_aspect_ratio else "square"
+        self.log_to_terminal(f"ImageLoader ready to process {len(x)} images (output range: [0, 1], resize mode: {resize_mode})")
     
     def custom_transform(self, x: npt.NDArray[np.str_]) -> npt.NDArray[np.float32]:
         """Transform image paths to tensors in [0, 1] range.
@@ -68,7 +70,19 @@ class ImageLoader(VerboseTransformationBlock):
         img = Image.open(img_path).convert('RGB')
         
         # Resize
-        img = img.resize((self.size, self.size), Image.BILINEAR)
+        if self.preserve_aspect_ratio:
+            # Resize so that the shortest edge is self.size
+            w, h = img.size
+            if w < h:
+                new_w = self.size
+                new_h = int(h * (self.size / w))
+            else:
+                new_h = self.size
+                new_w = int(w * (self.size / h))
+            img = img.resize((new_w, new_h), Image.BILINEAR)
+        else:
+            # Resize to square
+            img = img.resize((self.size, self.size), Image.BILINEAR)
         
         # Convert to tensor [0, 255]
         img_array = np.array(img, dtype=np.float32)

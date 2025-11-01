@@ -32,6 +32,7 @@ class MainTrainer(TorchTrainer, Logger):
     tta_hflip: bool = field(default=False, init=True, repr=False, compare=False)
     tta_vflip: bool = field(default=False, init=True, repr=False, compare=False)
     tta_rotate: bool = field(default=False, init=True, repr=False, compare=False)
+    tta_sliding_window: int = field(default=1, init=True, repr=False, compare=False)  # Number of horizontal sliding window slices for inference
     nominal_batch_size: int = field(default=16, init=True, repr=False, compare=False)
     scorer: Optional[Scorer] = None  # For exact validation metric computation
     mean: tuple[float, float, float] = (0.485, 0.456, 0.406)  # Normalization mean
@@ -283,42 +284,80 @@ class MainTrainer(TorchTrainer, Logger):
 
         with torch.no_grad(), tqdm(loader, unit="batch", disable=False) as tepoch:
             for data in tepoch:
-                if self.tta_hflip or self.tta_vflip or self.tta_rotate:
+                X_batch = batch_to_device(data[0], self.x_tensor_type, self.device)
+                
+                if self.tta_sliding_window > 1 or self.tta_hflip or self.tta_vflip or self.tta_rotate:
                     # Test-time augmentation for regression
-                    tta_preds = []
+                    all_preds = []
                     
-                    # Generate combinations based on enabled TTA options
-                    hflip_options = [False, True] if self.tta_hflip else [False]
-                    vflip_options = [False, True] if self.tta_vflip else [False]
-                    rot_options = [0, 1, 2, 3] if self.tta_rotate else [0]
+                    # Sliding window is the outer loop - for each window, apply TTA
+                    windows = self._get_sliding_windows(X_batch) if self.tta_sliding_window > 1 else [(X_batch, slice(None))]
                     
-                    for hflip in hflip_options:
-                        for vflip in vflip_options:
-                            for rot in rot_options:
-                                X_batch = batch_to_device(data[0], self.x_tensor_type, self.device)
-
-                                # Apply transformations
-                                if hflip:
-                                    X_batch = torch.flip(X_batch, dims=[3])  # Flip width (horizontal)
-                                if vflip:
-                                    X_batch = torch.flip(X_batch, dims=[2])  # Flip height (vertical)
-                                if rot != 0:
-                                    X_batch = torch.rot90(X_batch, k=rot, dims=[2, 3])
-
-                                # Predict
-                                y_pred = self.model(X_batch)
-                                
-                                # No need to inverse transform for regression
-                                tta_preds.append(y_pred)
+                    for window, _ in windows:
+                        # Generate combinations based on enabled TTA options
+                        hflip_options = [False, True] if self.tta_hflip else [False]
+                        vflip_options = [False, True] if self.tta_vflip else [False]
+                        rot_options = [0, 1, 2, 3] if self.tta_rotate else [0]
+                        
+                        for hflip in hflip_options:
+                            for vflip in vflip_options:
+                                for rot in rot_options:
+                                    window_transformed = window.clone()
+                                    
+                                    # Apply transformations to this window
+                                    if hflip:
+                                        window_transformed = torch.flip(window_transformed, dims=[3])  # Flip width (horizontal)
+                                    if vflip:
+                                        window_transformed = torch.flip(window_transformed, dims=[2])  # Flip height (vertical)
+                                    if rot != 0:
+                                        window_transformed = torch.rot90(window_transformed, k=rot, dims=[2, 3])
+                                    
+                                    # Predict on transformed window
+                                    y_pred = self.model(window_transformed)
+                                    all_preds.append(y_pred)
                     
-                    pred = torch.mean(torch.stack(tta_preds), dim=0)
+                    # Average all predictions (across all windows and TTA variants)
+                    pred = torch.mean(torch.stack(all_preds), dim=0)
                     predictions.extend(pred.cpu().numpy())
                 else:
-                    X_batch = batch_to_device(data[0], self.x_tensor_type, self.device)
                     y_pred = self.model(X_batch).cpu().numpy()
                     predictions.extend(y_pred)
         
         return np.array(predictions)
+    
+    def _get_sliding_windows(self, X_batch: Tensor) -> list[tuple[Tensor, slice]]:
+        """Extract sliding windows from horizontally wide images.
+        
+        Assumes images are wider than they are tall (2:1 aspect ratio or similar).
+        Splits the image into multiple overlapping windows.
+        
+        :param X_batch: Input batch (B, C, H, W)
+        :return: List of (window_tensor, slice) tuples
+        """
+        B, C, H, W = X_batch.shape
+        
+        # If image is square or portrait, return the full image
+        if W <= H:
+            return [(X_batch, slice(None))]
+        
+        # Calculate window size (square)
+        window_size = H
+        
+        # Calculate stride for overlapping windows
+        # Distribute windows evenly across the width with overlap
+        stride = (W - window_size) // (self.tta_sliding_window - 1) if self.tta_sliding_window > 1 else W
+        
+        windows = []
+        for i in range(self.tta_sliding_window):
+            # Calculate window start position
+            start_w = min(i * stride, W - window_size)
+            end_w = start_w + window_size
+            
+            # Extract window
+            window = X_batch[:, :, :, start_w:end_w]
+            windows.append((window, slice(start_w, end_w)))
+        
+        return windows
 
     def save_model_to_external(self) -> None:
         """Save the model to external storage."""
