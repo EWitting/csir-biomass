@@ -76,3 +76,8 @@ class WeightedR2(Scorer):
         
         return float(r2)
 
+    def __repr__(self) -> str:
+        """Return a deterministic string representation of the scorer."""
+        weights_str = np.array2string(self.weights, separator=', ', precision=4)
+        return f"{self.__class__.__name__}(name={self.name!r}, weights={weights_str})"
+

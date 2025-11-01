@@ -20,3 +20,7 @@ class Scorer(ABC):
     def __str__(self) -> str:
         """Return the name of the scorer."""
         return self.name
+
+    def __repr__(self) -> str:
+        """Return a deterministic string representation of the scorer."""
+        return f"{self.__class__.__name__}(name={self.name!r})"

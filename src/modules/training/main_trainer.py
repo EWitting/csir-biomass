@@ -19,6 +19,7 @@ from src.modules.logging.logger import Logger
 from src.modules.training.augmentation import Augmentation
 from src.modules.training.dataset import AugmentedDataset
 from src.scoring.scorer import Scorer
+from pathlib import Path
 
 
 @dataclass
@@ -28,9 +29,13 @@ class MainTrainer(TorchTrainer, Logger):
     augmentations: Optional[Augmentation] = None
     val_augmentations: Optional[Augmentation] = None
     gradient_accumulation_steps: int = 1
-    tta: bool = field(default=False, init=True, repr=False, compare=False)
+    tta_hflip: bool = field(default=False, init=True, repr=False, compare=False)
+    tta_vflip: bool = field(default=False, init=True, repr=False, compare=False)
+    tta_rotate: bool = field(default=False, init=True, repr=False, compare=False)
     nominal_batch_size: int = field(default=16, init=True, repr=False, compare=False)
     scorer: Optional[Scorer] = None  # For exact validation metric computation
+    mean: tuple[float, float, float] = (0.485, 0.456, 0.406)  # Normalization mean
+    std: tuple[float, float, float] = (0.229, 0.224, 0.225)  # Normalization std
 
     def create_datasets(
         self,
@@ -52,13 +57,17 @@ class MainTrainer(TorchTrainer, Logger):
                 torch.from_numpy(x[train_indices]),
                 torch.from_numpy(y[train_indices]),
                 self.augmentations,
-                device=self.device
+                device=self.device,
+                mean=self.mean,
+                std=self.std
             )
             validation_dataset = AugmentedDataset(
                 torch.from_numpy(x[validation_indices]),
                 torch.from_numpy(y[validation_indices]),
                 self.val_augmentations,
-                device=self.device
+                device=self.device,
+                mean=self.mean,
+                std=self.std
             )
             return train_dataset, validation_dataset
 
@@ -81,7 +90,11 @@ class MainTrainer(TorchTrainer, Logger):
         """
         return AugmentedDataset(
             torch.cat([train_dataset.x, validation_dataset.x]),
-            torch.cat([train_dataset.y, validation_dataset.y])
+            torch.cat([train_dataset.y, validation_dataset.y]),
+            augmentation=None,
+            device=self.device,
+            mean=self.mean,
+            std=self.std
         )
 
     def create_prediction_dataset(
@@ -90,7 +103,9 @@ class MainTrainer(TorchTrainer, Logger):
     ) -> Dataset[tuple[Tensor, ...]]:
         """Create the prediction dataset.
 
-        :param x: The input data
+        Images are in [0, 1] range and need normalization via val_augmentations.
+
+        :param x: The input data (images in [0, 1] range)
         :return: The prediction dataset
         """
         if isinstance(x, np.ndarray):
@@ -98,7 +113,18 @@ class MainTrainer(TorchTrainer, Logger):
         else:
             x_tensor = torch.tensor(x, dtype=self.x_tensor_type)
         
-        return torch.utils.data.TensorDataset(x_tensor)
+        # Use AugmentedDataset without augmentations (only normalization)
+        # Create dummy targets for the dataset (not used during inference)
+        dummy_y = torch.zeros((len(x_tensor), 1), dtype=torch.float32)
+        
+        return AugmentedDataset(
+            x_tensor,
+            dummy_y,
+            augmentation=None,
+            device=self.device,
+            mean=self.mean,
+            std=self.std
+        )
 
     def train_one_epoch(
         self,
@@ -257,24 +283,33 @@ class MainTrainer(TorchTrainer, Logger):
 
         with torch.no_grad(), tqdm(loader, unit="batch", disable=False) as tepoch:
             for data in tepoch:
-                if self.tta:
+                if self.tta_hflip or self.tta_vflip or self.tta_rotate:
                     # Test-time augmentation for regression
                     tta_preds = []
-                    for flip in [False, True]:
-                        for rot in [0, 1, 2, 3]:
-                            X_batch = batch_to_device(data[0], self.x_tensor_type, self.device)
+                    
+                    # Generate combinations based on enabled TTA options
+                    hflip_options = [False, True] if self.tta_hflip else [False]
+                    vflip_options = [False, True] if self.tta_vflip else [False]
+                    rot_options = [0, 1, 2, 3] if self.tta_rotate else [0]
+                    
+                    for hflip in hflip_options:
+                        for vflip in vflip_options:
+                            for rot in rot_options:
+                                X_batch = batch_to_device(data[0], self.x_tensor_type, self.device)
 
-                            # Transform
-                            if flip:
-                                X_batch = torch.flip(X_batch, dims=[2, 3])
-                            if rot != 0:
-                                X_batch = torch.rot90(X_batch, k=rot, dims=[2, 3])
+                                # Apply transformations
+                                if hflip:
+                                    X_batch = torch.flip(X_batch, dims=[3])  # Flip width (horizontal)
+                                if vflip:
+                                    X_batch = torch.flip(X_batch, dims=[2])  # Flip height (vertical)
+                                if rot != 0:
+                                    X_batch = torch.rot90(X_batch, k=rot, dims=[2, 3])
 
-                            # Predict
-                            y_pred = self.model(X_batch)
-                            
-                            # No need to inverse transform for regression
-                            tta_preds.append(y_pred)
+                                # Predict
+                                y_pred = self.model(X_batch)
+                                
+                                # No need to inverse transform for regression
+                                tta_preds.append(y_pred)
                     
                     pred = torch.mean(torch.stack(tta_preds), dim=0)
                     predictions.extend(pred.cpu().numpy())
@@ -291,3 +326,31 @@ class MainTrainer(TorchTrainer, Logger):
             model_artifact = wandb.Artifact(self.model_name, type="model")
             model_artifact.add_file(f"{self.trained_models_directory}/{self.get_hash()}.pt")
             wandb.log_artifact(model_artifact)
+
+    def _load_model(self, path: Path | None = None) -> None:
+            """Load the model from the model_directory folder."""
+            model_path = path if path is not None else self.get_model_path()
+
+            # Check if the model exists
+            if not model_path.exists():
+                raise FileNotFoundError(
+                    f"Model not found in {model_path}",
+                )
+
+            # Load model
+            self.log_to_terminal(
+                f"Loading model from {model_path}",
+            )
+            checkpoint = torch.load(model_path, weights_only=False)
+
+            # Load the weights from the checkpoint
+            if isinstance(checkpoint, nn.DataParallel):
+                model = checkpoint.module
+            else:
+                model = checkpoint
+
+            # Set the current model to the loaded model
+            if isinstance(self.model, nn.DataParallel):
+                self.model.module.load_state_dict(model.state_dict())
+            else:
+                self.model.load_state_dict(model.state_dict())
