@@ -1,4 +1,4 @@
-This codebase is set up specifically for the workflow of (Kaggle) ML competitions. It is cloned from `Apoch`, which is a template that imports a lot of functionality from `epochlib` at https://github.com/TeamEpochGithub/epochlib.
+This codebase is set up specifically for the workflow of (Kaggle) ML competitions. It is cloned from `Apoch`, which is a template that imports a lot of functionality from `epochlib` at https://github.com/TeamEpochGithub/epochlib. This repo is public, if necessary and you have web tool access, you can explore the codebase glob there.
 Pipelines are structured using Hydra instantiate and follow a specific pattern. Some parts are disabled during inference on Kaggle.
 Wandb is used for logging and hyperparameter tuning.
 
