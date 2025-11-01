@@ -21,7 +21,7 @@ train_sys:
       gradient_accumulation_steps: 1
       use_mixed_precision: true
       nominal_batch_size: 16
-      tta_hflip: false
+      tta_hflip: true
       tta_vflip: false
       tta_rotate: false
       mean: [0.485, 0.456, 0.406]  # ImageNet normalization
@@ -30,7 +30,6 @@ train_sys:
       model:
         _target_: src.modules.training.models.biomass_model.BiomassModel
         backbone:
-          _target_: timm.create_model
           model_name: efficientnet_b0
           pretrained: true
           num_classes: 0  # Remove classifier head

@@ -49,9 +49,6 @@ def run_submit(cfg: DictConfig) -> None:
 
     # Make submission
     if predictions is not None:
-        # Load sample submission to get the correct structure
-        sample_submission = pd.read_csv(Path(cfg.data_path).parent / "sample_submission.csv")
-        
         # Load test.csv to get image IDs
         test_df = pd.read_csv(Path(cfg.data_path))
         
@@ -73,10 +70,6 @@ def run_submit(cfg: DictConfig) -> None:
                 submission_data.append({'sample_id': sample_id, 'target': target_value})
         
         submission = pd.DataFrame(submission_data)
-        
-        # Verify we have the same sample_ids as the sample submission
-        if not set(submission['sample_id']) == set(sample_submission['sample_id']):
-            logger.warning("Sample IDs don't match sample_submission.csv!")
         
         logger.info(f"Created submission with {len(submission)} rows for {len(image_ids)} images")
         
