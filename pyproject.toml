@@ -55,6 +55,7 @@ dependencies = [
     "torchaudio>=2.3.1",
     "torchvision>=0.18.1",
     "kaggle>=1.7.4.5",
+    "torch-ema>=0.3",
 ]
 
 
