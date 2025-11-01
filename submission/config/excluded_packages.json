@@ -1,0 +1,11 @@
+{
+  "excluded_packages": [
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "argon2-cffi-bindings"
+  ],
+  "auto_exclude_kaggle_packages": true,
+  "comment": "excluded_packages: Manually specified packages to exclude. auto_exclude_kaggle_packages: If true, automatically excludes all packages listed in kaggle_container_packages.txt (generated via 'pip freeze' on Kaggle)."
+}
+

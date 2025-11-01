@@ -3,11 +3,11 @@ import os
 import shutil
 from pathlib import Path
 
-from epochlib.logging.section_separator import print_section_separator
+from src.utils.logger import print_section_separator
 
-DEPENDENCIES_SAVE_PATH = Path('dependencies')
-SOURCE_CODE_SAVE_PATH = Path('source-code')
-SOURCE_CODE_PATH = Path('../')
+DEPENDENCIES_SAVE_PATH = Path('submission/dependencies')
+SOURCE_CODE_SAVE_PATH = Path('submission/source-code')
+SOURCE_CODE_PATH = Path('./')
 
 # You can specify tm hashes here to exclude them from the source code dataset.
 TM_HASH = [
@@ -25,7 +25,7 @@ def verify_config():
         raise OSError(new_message) from e
 
     # Check if the config file is present and filled in
-    configs = Path("config")
+    configs = Path("./submission/config")
     source_path = configs / "source.json"
     dependencies_path = configs / "dependencies.json"
 
@@ -69,6 +69,48 @@ def verify_config():
 def update_dependencies():
     print_section_separator("Update the dependencies.")
 
+    # Load excluded packages configuration
+    excluded_config_path = Path("./submission/config/excluded_packages.json")
+    if excluded_config_path.exists():
+        excluded_config = json.load(open(excluded_config_path))
+        excluded_packages = excluded_config.get("excluded_packages", [])
+        auto_exclude_kaggle = excluded_config.get("auto_exclude_kaggle_packages", False)
+        
+        print(f'Manually excluded packages: {", ".join(excluded_packages)}')
+        
+        # Load Kaggle container packages if auto-exclude is enabled
+        if auto_exclude_kaggle:
+            kaggle_packages_path = Path("./submission/config/kaggle_container_packages.txt")
+            if kaggle_packages_path.exists():
+                print('Loading Kaggle container packages for auto-exclusion...')
+                with open(kaggle_packages_path, 'r') as f:
+                    kaggle_lines = f.readlines()
+                
+                # Parse package names from "package==version" format
+                kaggle_packages = []
+                for line in kaggle_lines:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        # Extract package name before ==, >=, etc.
+                        pkg_name = line.split('==')[0].split('>=')[0].split('<=')[0].split('~=')[0].split('!=')[0].strip()
+                        if pkg_name:
+                            kaggle_packages.append(pkg_name)
+                
+                # Merge with manually excluded packages (avoid duplicates)
+                kaggle_packages_set = set(kaggle_packages)
+                excluded_packages_set = set(excluded_packages)
+                all_excluded = list(excluded_packages_set.union(kaggle_packages_set))
+                
+                print(f'  Found {len(kaggle_packages)} packages in Kaggle container')
+                print(f'  Total packages to exclude: {len(all_excluded)} (manual + Kaggle)')
+                excluded_packages = all_excluded
+            else:
+                print('  ⚠️  auto_exclude_kaggle_packages is true, but kaggle_container_packages.txt not found')
+                print('  Download it by running "pip freeze > kaggle_container_packages.txt" on Kaggle')
+    else:
+        excluded_packages = []
+        print('No excluded packages configuration found.')
+
     if os.path.exists(DEPENDENCIES_SAVE_PATH):
         print('Cleaning the dependencies folder')
         for filename in os.listdir(DEPENDENCIES_SAVE_PATH):
@@ -81,24 +123,152 @@ def update_dependencies():
     else:
         os.makedirs(DEPENDENCIES_SAVE_PATH)
 
-    print('Copying the requirements.txt file and excluding -e')
+    print('Copying the requirements.txt file and excluding -e, kaggle, and configured packages')
     with open(SOURCE_CODE_PATH / 'requirements.txt', 'r') as f:
         lines = f.readlines()
     with open(DEPENDENCIES_SAVE_PATH / 'requirements.txt', 'w') as f:
         for line in lines:
+            line_stripped = line.strip().lower()
+            # Skip -e lines
             if line.startswith('-e'):
                 continue
-            if line.startswith('kaggle'):
+            # Skip kaggle package
+            if line_stripped.startswith('kaggle'):
                 continue
-            f.write(line)
+            # Skip excluded packages (check package name before == or any operator)
+            skip_line = False
+            for excluded_pkg in excluded_packages:
+                # Check if line starts with the package name (case insensitive)
+                if line_stripped.startswith(excluded_pkg.lower()):
+                    # Make sure it's followed by ==, >=, etc or end of line
+                    pkg_len = len(excluded_pkg)
+                    if len(line_stripped) == pkg_len or line_stripped[pkg_len] in ['=', '>', '<', '!', ' ', '\n']:
+                        skip_line = True
+                        break
+            if not skip_line:
+                f.write(line)
 
     if not os.path.exists(DEPENDENCIES_SAVE_PATH / 'tmp'):
         os.makedirs(DEPENDENCIES_SAVE_PATH / 'tmp')
-    print('Downloading the dependencies')
-    if not os.path.exists(DEPENDENCIES_SAVE_PATH / 'tmp'):
-        os.makedirs(DEPENDENCIES_SAVE_PATH / 'tmp')
-    # Run pip command
-    os.system(f'pip download -r {DEPENDENCIES_SAVE_PATH / "requirements.txt"} -d {DEPENDENCIES_SAVE_PATH / "tmp"}')
+    
+    print('Downloading all dependencies for current platform')
+    # Simple approach: download for current OS, then filter out platform-specific wheels
+    download_cmd = (
+        f'uv run pip download '
+        f'-r {DEPENDENCIES_SAVE_PATH / "requirements.txt"} '
+        f'-d {DEPENDENCIES_SAVE_PATH / "tmp"}'
+    )
+    result = os.system(download_cmd)
+    if result != 0:
+        raise RuntimeError('Failed to download dependencies')
+    
+    print('Filtering out platform-specific (Windows) wheels...')
+    tmp_dir = DEPENDENCIES_SAVE_PATH / 'tmp'
+    windows_specific_wheels = []
+    windows_specific_packages = []  # Track package names to remove from requirements.txt
+    
+    if os.path.exists(tmp_dir):
+        for filename in os.listdir(tmp_dir):
+            if not filename.endswith('.whl'):
+                # Keep non-wheel files (source distributions are fine)
+                continue
+            
+            # Check if this is a Windows-specific wheel
+            # Windows wheels have platform tags like: win32, win_amd64, win_arm64
+            # Linux/universal wheels have: manylinux, musllinux, linux, any
+            filename_lower = filename.lower()
+            
+            # List of Windows-specific platform tags
+            windows_tags = ['win32', 'win_amd64', 'win_arm64', 'win_ia64']
+            is_windows_wheel = any(f'-{tag}.whl' in filename_lower for tag in windows_tags)
+            
+            if is_windows_wheel:
+                windows_specific_wheels.append(filename)
+                # Extract package name from wheel filename
+                pkg_name = filename.split('-')[0]
+                windows_specific_packages.append(pkg_name)
+                wheel_path = tmp_dir / filename
+                os.remove(wheel_path)
+    
+    if windows_specific_wheels:
+        print(f'  ⚠️  WARNING: Removed {len(windows_specific_wheels)} Windows-specific wheels:')
+        for wheel in windows_specific_wheels:
+            # Extract package name from wheel filename
+            pkg_name = wheel.split('-')[0]
+            print(f'    - {pkg_name} ({wheel})')
+        print('  These packages will need to be installed from source on Kaggle, or you may need')
+        print('  to manually download Linux-compatible wheels for them.')
+    else:
+        print('  ✓ All wheels are Linux-compatible or platform-independent')
+
+    print('Removing excluded package wheels from downloaded dependencies')
+    additional_removed_packages = []  # Track additional packages removed beyond the initial exclusion list
+    if excluded_packages:
+        tmp_dir = DEPENDENCIES_SAVE_PATH / 'tmp'
+        if os.path.exists(tmp_dir):
+            removed_count = 0
+            for filename in os.listdir(tmp_dir):
+                # Check if the wheel file is for an excluded package
+                for excluded_pkg in excluded_packages:
+                    # Wheel files are named like: package_name-version-...-.whl
+                    # Normalize both to lowercase and replace _ with - for comparison
+                    normalized_filename = filename.lower().replace('_', '-')
+                    normalized_pkg = excluded_pkg.lower().replace('_', '-')
+                    if normalized_filename.startswith(normalized_pkg + '-'):
+                        wheel_path = tmp_dir / filename
+                        os.remove(wheel_path)
+                        print(f'  Removed: {filename}')
+                        removed_count += 1
+                        # Track the actual package name from the wheel
+                        pkg_name = filename.split('-')[0]
+                        additional_removed_packages.append(pkg_name)
+                        break
+            print(f'Total wheels removed: {removed_count}')
+    
+    # Now update requirements.txt to remove packages whose wheels were removed
+    print('Syncing requirements.txt with available wheels...')
+    all_removed_packages = set(windows_specific_packages + additional_removed_packages)
+    
+    if all_removed_packages:
+        # Read current requirements.txt
+        with open(DEPENDENCIES_SAVE_PATH / 'requirements.txt', 'r') as f:
+            req_lines = f.readlines()
+        
+        # Filter out removed packages
+        updated_req_lines = []
+        removed_from_req = []
+        for line in req_lines:
+            line_stripped = line.strip().lower()
+            if not line_stripped or line_stripped.startswith('#'):
+                updated_req_lines.append(line)
+                continue
+            
+            # Extract package name from requirement line
+            req_pkg_name = line_stripped.split('==')[0].split('>=')[0].split('<=')[0].split('~=')[0].split('!=')[0].strip()
+            req_pkg_name_normalized = req_pkg_name.replace('_', '-')
+            
+            # Check if this package had its wheel removed
+            should_remove = False
+            for removed_pkg in all_removed_packages:
+                removed_pkg_normalized = removed_pkg.lower().replace('_', '-')
+                if req_pkg_name_normalized == removed_pkg_normalized:
+                    should_remove = True
+                    removed_from_req.append(req_pkg_name)
+                    break
+            
+            if not should_remove:
+                updated_req_lines.append(line)
+        
+        # Write back the updated requirements.txt
+        with open(DEPENDENCIES_SAVE_PATH / 'requirements.txt', 'w') as f:
+            f.writelines(updated_req_lines)
+        
+        if removed_from_req:
+            print(f'  Removed {len(removed_from_req)} packages from requirements.txt to match available wheels')
+            for pkg in removed_from_req:
+                print(f'    - {pkg}')
+    else:
+        print('  ✓ No packages need to be removed from requirements.txt')
 
     print('Zipping the downloaded dependencies')
     shutil.make_archive(DEPENDENCIES_SAVE_PATH / 'dependencies', 'zip', DEPENDENCIES_SAVE_PATH / 'tmp')
@@ -106,7 +276,7 @@ def update_dependencies():
     shutil.rmtree(DEPENDENCIES_SAVE_PATH / 'tmp')
 
     print('Copying the dataset-metadata.json file')
-    shutil.copy('config/dependencies.json', DEPENDENCIES_SAVE_PATH / 'dataset-metadata.json')
+    shutil.copy('submission/config/dependencies.json', DEPENDENCIES_SAVE_PATH / 'dataset-metadata.json')
 
     print('Excluding --find-files in requirements.txt')
     with open(DEPENDENCIES_SAVE_PATH / 'requirements.txt', 'r') as f:
@@ -120,7 +290,9 @@ def update_dependencies():
     print('Done')
 
     # Upload the dataset
-    os.system(f'kaggle datasets version -p ./dependencies -m "Update Dependencies"')
+    result = os.system(f'kaggle datasets version -p {DEPENDENCIES_SAVE_PATH} -m "Update Dependencies"')
+    if result != 0:
+        raise RuntimeError('Failed to upload dependencies dataset to Kaggle')
 
 
 def update_source():
@@ -162,12 +334,20 @@ def update_source():
     shutil.make_archive(SOURCE_CODE_SAVE_PATH / 'source-code', 'zip', SOURCE_CODE_SAVE_PATH / "tmp")
     shutil.rmtree(SOURCE_CODE_SAVE_PATH / "tmp")
 
-    # # Copy dataset-metadata.json to submission
-    shutil.copy('config/source.json', SOURCE_CODE_SAVE_PATH / 'dataset-metadata.json')
+    # Copy dataset-metadata.json to submission
+    shutil.copy('submission/config/source.json', SOURCE_CODE_SAVE_PATH / 'dataset-metadata.json')
+    
+    # Copy installation scripts and documentation
+    if os.path.exists('submission/install_dependencies.sh'):
+        shutil.copy('submission/install_dependencies.sh', SOURCE_CODE_SAVE_PATH / 'install_dependencies.sh')
+    if os.path.exists('submission/KAGGLE_SETUP.md'):
+        shutil.copy('submission/KAGGLE_SETUP.md', SOURCE_CODE_SAVE_PATH / 'KAGGLE_SETUP.md')
 
     print('Submission files saved to source_code')
 
-    os.system(f'kaggle datasets version -p ./source-code -m "Update Source Code"')
+    result = os.system(f'kaggle datasets version -p {SOURCE_CODE_SAVE_PATH} -m "Update Source Code"')
+    if result != 0:
+        raise RuntimeError('Failed to upload source code dataset to Kaggle')
 
 
 def manage_datasets():
@@ -175,7 +355,7 @@ def manage_datasets():
     verify_config()
 
     # Update dependencies
-    update_dep = input("Would you like to update the dependencies? (y/n): ").lower()
+    update_dep = input("Would you like to update the dependencies? (Run `uv pip freeze > requirements.txt` first and save as UTF-8) (y/n): ").lower()
 
     if update_dep == "y":
         update_dependencies()

@@ -52,8 +52,10 @@ class Trainer:
 - create a model class, or directly instantiate the object through the configuration from a library (e.g. segmentation_models_pytorch)
 - depending on the competition. you might want some operations to happen to data during training, and not preprocessed, e.g. random data augmentation. A common pattern is to create a custom dataset class that applies a list of augmentations of the appropriate data type. Pass this list to the trainer in the config, and extend/override the trainer class to use this dataset format.
 - create a configuration file that describes the pipeline. see below.
+- modify submit.py to create the submission format required by the competition. There is often a sample submission file in the data/raw folder.
 - select the model in train.yaml (or cv.yaml), and run with commands as below.
 - when framework succesfully created. enable wandb in conf/wandb/train.yaml to start logging runs
+- for kaggle submissions, see below
 
 # Hydra configuration:
 A model pipeline is defined in a single yaml file. Which includes training parameters. Instantiate uses the _target_ pattern. Note that segmentation_models_pytorch is used directly. No python file is created for this model. Note also the partial. This is necessary for objects that need to be instantiated at runtime, e.g. the optimizer based on model parameters. Example:
@@ -156,7 +158,10 @@ Each file has a corresponding .yaml file in the conf/ directory. This specifies 
 
 Use `uv run train` to train the model etc. Hydra allows command line arguments to switch models, e.g. `uv run train model=mlp`. LET THE USER RUN THE COMMAND THEMSELVES for long training runs, so they can do it in their own large terminal window instead of the integrated agent terminal.
 
+# Kaggle submissions
 Code and models are uploaded to Kaggle through the API with the submission/manage_datasets.py utility scripts. The user needs to fill this in their own terminal, as they are prompted for the API key and other information. This will then be used for submission.
+
+The datasets names and paths are defined in the submission/config/source.json and submission/config/dependencies.json files. On first use, they need to be created, can be with a dummy file.
 
 # Logging
 When inheriting from VerboseTransformationBlock or VerboseTrainingBlock, the logger will be available as:

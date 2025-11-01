@@ -1,7 +1,7 @@
 defaults:
   - base_submit
   - hydra/logging
-  - model: ??? # Add models or ensembles
+  - model: biomass_base # Add models or ensembles
 
 # Use this when uploading to Kaggle
 
@@ -10,7 +10,11 @@ defaults:
 #    PATHS    #
 #             #
 ###############
-
+raw_path: data/raw
+cache_path: data/cache
+# data_path: data/raw/test.csv
+data_path: /kaggle/input/csiro-biomass/test.csv
+processed_path: data/processed
 result_path: /kaggle/working/
 
 # Local paths

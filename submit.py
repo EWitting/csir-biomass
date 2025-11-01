@@ -40,7 +40,7 @@ def run_submit(cfg: DictConfig) -> None:
     model_pipeline = setup_pipeline(cfg, is_train=False)
 
     # Load the test data
-    X = setup_inference_data()
+    X = setup_inference_data(Path(cfg.data_path))
 
     # Predict on the test data
     logger.info("Making predictions...")
@@ -48,12 +48,39 @@ def run_submit(cfg: DictConfig) -> None:
     predictions = model_pipeline.predict(X, **pred_args)
 
     # Make submission
-    raise NotImplementedError("Making submissions is different for each competition")
     if predictions is not None:
-        # Create a dataframe from the predictions
-        submission = pd.dataframe()
-
-        # Save submissions to path (Might be different for other platforms than Kaggle)
+        # Load sample submission to get the correct structure
+        sample_submission = pd.read_csv(Path(cfg.data_path).parent / "sample_submission.csv")
+        
+        # Load test.csv to get image IDs
+        test_df = pd.read_csv(Path(cfg.data_path))
+        
+        # Get unique image IDs from test set (predictions are ordered by unique images)
+        unique_images = test_df[['image_path']].drop_duplicates().reset_index(drop=True)
+        
+        # Extract image IDs from paths (e.g., "test/ID1001187975.jpg" -> "ID1001187975")
+        image_ids = unique_images['image_path'].apply(lambda x: Path(x).stem).tolist()
+        
+        # Target names in the order they were predicted (must match setup_train_y_data)
+        target_names = ['Dry_Clover_g', 'Dry_Dead_g', 'Dry_Green_g', 'GDM_g', 'Dry_Total_g']
+        
+        # Create submission dataframe
+        submission_data = []
+        for i, image_id in enumerate(image_ids):
+            for j, target_name in enumerate(target_names):
+                sample_id = f"{image_id}__{target_name}"
+                target_value = predictions[i, j]
+                submission_data.append({'sample_id': sample_id, 'target': target_value})
+        
+        submission = pd.DataFrame(submission_data)
+        
+        # Verify we have the same sample_ids as the sample submission
+        if not set(submission['sample_id']) == set(sample_submission['sample_id']):
+            logger.warning("Sample IDs don't match sample_submission.csv!")
+        
+        logger.info(f"Created submission with {len(submission)} rows for {len(image_ids)} images")
+        
+        # Save submissions to path (Kaggle format)
         result_path = Path(cfg.result_path)
         os.makedirs(result_path, exist_ok=True)
         submission_path = result_path / "submission.csv"

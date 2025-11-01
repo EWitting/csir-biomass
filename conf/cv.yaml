@@ -1,7 +1,7 @@
 defaults:
   - base_cv
   - hydra/logging
-  - model: ??? # Add models or ensembles
+  - model: biomass_base # Add models or ensembles
   - wandb: train
 
 ###############
@@ -10,11 +10,17 @@ defaults:
 #             #
 ###############
 processed_path: data/processed
+raw_path: data/raw
+cache_path: data/cache
+data_path: data/raw/train.csv
 
 scorer:
-  _target_: ??? # Add scorer
+  _target_: src.scoring.weighted_r2.WeightedR2 # Add scorer
+  name: weighted_r2
 splitter:
-  _target_: ??? # Add splitter
-  n_splits: 10
+  _target_: sklearn.model_selection.KFold
+  n_splits: 5
+  shuffle: true
+  random_state: 42
 allow_multiple_instances: true
 save_folds: true
