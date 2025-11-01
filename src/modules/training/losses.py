@@ -111,4 +111,53 @@ class WeightedLoss(nn.Module):
         weighted_loss = torch.sum(losses * weight_tensor)
         
         return weighted_loss
+    
+    def __repr__(self) -> str:
+        """Custom repr that includes all parameters that influence training behavior.
+        
+        Ugly, but quick fix for to make the model hashing and reproducibility work properly.
+        """
+        # Get base_loss parameters by inspecting its attributes
+        base_loss_params = []
+        base_loss_class = self.base_loss.__class__.__name__
+        
+        # Common attributes to check for various loss functions
+        # These are the parameters that typically influence loss behavior
+        param_attrs = [
+            'delta',  # HuberLoss
+            'reduction',  # Most losses
+            'weight',  # Some losses
+            'size_average',  # Legacy losses
+            'ignore_index',  # CrossEntropyLoss
+            'label_smoothing',  # CrossEntropyLoss
+            'beta',  # SmoothL1Loss
+            'alpha',  # FocalLoss (if used)
+            'gamma',  # FocalLoss (if used)
+        ]
+        
+        for attr in param_attrs:
+            if hasattr(self.base_loss, attr):
+                value = getattr(self.base_loss, attr)
+                # Only include if not None and not a tensor buffer
+                if value is not None and not isinstance(value, torch.Tensor):
+                    base_loss_params.append(f"{attr}={repr(value)}")
+        
+        # Build base_loss repr with its parameters
+        if base_loss_params:
+            base_loss_repr = f"{base_loss_class}({', '.join(base_loss_params)})"
+        else:
+            base_loss_repr = f"{base_loss_class}()"
+        
+        # Convert weight tensor to list for readable repr
+        weights_list = self.weight_tensor.tolist()
+        
+        # Build complete repr
+        return (
+            f"{self.__class__.__name__}(\n"
+            f"  base_loss={base_loss_repr},\n"
+            f"  weights={weights_list},\n"
+            f"  scale_by_variance={self.scale_by_variance},\n"
+            f"  variance_momentum={self.variance_momentum}\n"
+            f")"
+        )
 

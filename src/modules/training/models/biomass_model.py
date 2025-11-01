@@ -1,5 +1,6 @@
 """Biomass prediction model using timm backbone."""
 import timm
+import torch
 import torch.nn as nn
 
 from src.utils.logger import logger
@@ -9,6 +10,8 @@ class BiomassModel(nn.Module):
     """Multi-output regression model for biomass prediction.
     
     Uses a timm backbone with a custom head for 5 biomass outputs.
+    Can optionally learn only base components (clover, dead, green) and compute
+    aggregates (GDM, Total) arithmetically.
     """
     
     def __init__(
@@ -16,17 +19,23 @@ class BiomassModel(nn.Module):
         backbone: dict,
         num_outputs: int = 5,
         dropout: float = 0.2,
+        compute_aggregates: bool = False,
     ) -> None:
         """Initialize the model.
         
         :param backbone: Dictionary of kwargs for timm.create_model()
-        :param num_outputs: Number of output values
+        :param num_outputs: Number of output values (5 by default)
         :param dropout: Dropout rate for the head
+        :param compute_aggregates: If True, model learns only 3 base components 
+            (clover, dead, green) and computes GDM and Total arithmetically.
+            Target order: [Dry_Clover_g, Dry_Dead_g, Dry_Green_g, GDM_g, Dry_Total_g]
+            GDM = Green + Clover, Total = Green + Clover + Dead
         """
         super().__init__()
         
         self.num_outputs = num_outputs
         self.dropout = dropout
+        self.compute_aggregates = compute_aggregates
         
         # Create backbone with timm, handling internet connectivity issues
         try:
@@ -47,10 +56,14 @@ class BiomassModel(nn.Module):
         # Get feature dimension from backbone
         self.num_features = self.backbone.num_features
         
+        # Determine number of outputs for the head
+        # If compute_aggregates is True, learn only base components (clover, dead, green)
+        head_outputs = 3 if self.compute_aggregates else self.num_outputs
+        
         # Create custom regression head
         self.head = nn.Sequential(
             nn.Dropout(p=self.dropout),
-            nn.Linear(self.num_features, self.num_outputs)
+            nn.Linear(self.num_features, head_outputs)
         )
     
     def forward(self, x):
@@ -61,5 +74,21 @@ class BiomassModel(nn.Module):
         """
         features = self.backbone(x)
         output = self.head(features)
+        
+        # If compute_aggregates is True, compute GDM and Total from base components
+        if self.compute_aggregates:
+            # output shape: (B, 3) with [clover, dead, green]
+            clover = output[:, 0:1]  # (B, 1)
+            dead = output[:, 1:2]    # (B, 1)
+            green = output[:, 2:3]   # (B, 1)
+            
+            # Compute aggregates
+            gdm = green + clover     # GDM = Green + Clover
+            total = green + clover + dead  # Total = Green + Clover + Dead
+            
+            # Concatenate to match expected output order
+            # [Dry_Clover_g, Dry_Dead_g, Dry_Green_g, GDM_g, Dry_Total_g]
+            output = torch.cat([clover, dead, green, gdm, total], dim=1)
+        
         return output
 
