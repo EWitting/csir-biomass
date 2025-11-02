@@ -20,6 +20,7 @@ class BiomassModel(nn.Module):
         num_outputs: int = 5,
         dropout: float = 0.2,
         compute_aggregates: bool = False,
+        activation: nn.Module | None = None,
     ) -> None:
         """Initialize the model.
         
@@ -30,12 +31,14 @@ class BiomassModel(nn.Module):
             (clover, dead, green) and computes GDM and Total arithmetically.
             Target order: [Dry_Clover_g, Dry_Dead_g, Dry_Green_g, GDM_g, Dry_Total_g]
             GDM = Green + Clover, Total = Green + Clover + Dead
+        :param activation: Optional activation function to apply after head
         """
         super().__init__()
         
         self.num_outputs = num_outputs
         self.dropout = dropout
         self.compute_aggregates = compute_aggregates
+        self.activation = activation
         
         # Create backbone with timm, handling internet connectivity issues
         try:
@@ -74,6 +77,10 @@ class BiomassModel(nn.Module):
         """
         features = self.backbone(x)
         output = self.head(features)
+        
+        # Apply optional activation function
+        if self.activation is not None:
+            output = self.activation(output)
         
         # If compute_aggregates is True, compute GDM and Total from base components
         if self.compute_aggregates:
