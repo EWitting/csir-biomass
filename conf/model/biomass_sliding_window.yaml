@@ -15,8 +15,8 @@ train_sys:
   steps:
     - _target_: src.modules.training.main_trainer.MainTrainer
       model_name: "BiomassEfficientNetB0SlidingWindow"
-      n_folds: 5  # Used during submission only, 0 for doing inference with the train full model, 5 e.g. for fold ensemble.
-      epochs: 75
+      n_folds: 0  # Used during submission only, 0 for doing inference with the train full model, 5 e.g. for fold ensemble.
+      epochs: 150
       patience: -1
       batch_size: 16
       gradient_accumulation_steps: 1
@@ -34,13 +34,13 @@ train_sys:
       model:
         _target_: src.modules.training.models.biomass_model.BiomassModel
         backbone:
-          model_name: efficientnet_b0
+          model_name: efficientnet_b3
           pretrained: true
           num_classes: 0  # Remove classifier head
           global_pool: avg
         num_outputs: 5
+        compute_aggregates: true
         dropout: 0.3
-        compute_aggregates: true  # Learn only base components (clover, dead, green), compute GDM and Total arithmetically
       
       criterion:
         _target_: src.modules.training.losses.WeightedLoss
