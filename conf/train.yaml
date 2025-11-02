@@ -1,7 +1,7 @@
 defaults:
   - base_train
   - hydra/logging
-  - model: biomass_base # Biomass prediction model
+  - model: biomass_sliding_window # Biomass prediction model
   - wandb: train
 
 ###############

@@ -1,7 +1,7 @@
 defaults:
   - base_cv
   - hydra/logging
-  - model: biomass_base # Add models or ensembles
+  - model: biomass_sliding_window # Add models or ensembles
   - wandb: train
 
 ###############

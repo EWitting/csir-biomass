@@ -5,8 +5,8 @@ defaults:
 x_sys:
   steps:
     - _target_: src.modules.transformation.image_loader.ImageLoader
-      size: 224
-      preserve_aspect_ratio: true  # Resize so shortest edge is 224 (e.g., 448x224 for 2:1 images)
+      size: 448
+      preserve_aspect_ratio: true  # Resize so shortest edge is size
 
 y_sys:
   steps: []
@@ -16,7 +16,7 @@ train_sys:
     - _target_: src.modules.training.main_trainer.MainTrainer
       model_name: "BiomassEfficientNetB0SlidingWindow"
       n_folds: 0  # Used during submission only, 0 for doing inference with the train full model, 5 e.g. for fold ensemble.
-      epochs: 150
+      epochs: 75
       patience: -1
       batch_size: 16
       gradient_accumulation_steps: 1
@@ -25,7 +25,7 @@ train_sys:
       tta_hflip: true
       tta_vflip: true
       tta_rotate: true
-      tta_sliding_window: 2  # Split horizontally into 2 overlapping windows during inference
+      tta_sliding_window: 10  # Split horizontally into overlapping windows during inference
       mean: [0.485, 0.456, 0.406]  # ImageNet normalization
       std: [0.229, 0.224, 0.225]
       use_ema: true
@@ -76,7 +76,7 @@ train_sys:
           _target_: kornia.augmentation.AugmentationSequential
           _args_:
             - _target_: kornia.augmentation.RandomCrop
-              size: [224, 224]
+              size: [448, 448]
             - _target_: kornia.augmentation.RandomHorizontalFlip
               p: 0.5
             - _target_: kornia.augmentation.RandomVerticalFlip
@@ -92,7 +92,7 @@ train_sys:
           _target_: kornia.augmentation.AugmentationSequential
           _args_:
             - _target_: kornia.augmentation.RandomCrop
-              size: [224, 224]
+              size: [448, 448]
           data_keys:
             - input
       
