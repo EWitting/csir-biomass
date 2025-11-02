@@ -11,7 +11,7 @@ SOURCE_CODE_PATH = Path('./')
 
 # You can specify tm hashes here to exclude them from the source code dataset.
 TM_HASH = [
-    # "...",
+    "48e770cd2b34cdf86467014a4315850c",
 ]
 
 
@@ -68,6 +68,14 @@ def verify_config():
 
 def update_dependencies():
     print_section_separator("Update the dependencies.")
+
+    # Automatically compile requirements.txt from pyproject.toml
+    print('Compiling requirements.txt from pyproject.toml...')
+    compile_cmd = 'uv pip compile pyproject.toml -o requirements.txt'
+    result = os.system(compile_cmd)
+    if result != 0:
+        raise RuntimeError('Failed to compile requirements.txt from pyproject.toml')
+    print('✓ requirements.txt compiled successfully')
 
     # Load excluded packages configuration
     excluded_config_path = Path("./submission/config/excluded_packages.json")
@@ -130,7 +138,7 @@ def update_dependencies():
         for line in lines:
             line_stripped = line.strip().lower()
             # Skip -e lines
-            if line.startswith('-e'):
+            if line.startswith('-e') or line.lstrip().startswith('#'):
                 continue
             # Skip kaggle package
             if line_stripped.startswith('kaggle'):
@@ -211,18 +219,25 @@ def update_dependencies():
                 # Check if the wheel file is for an excluded package
                 for excluded_pkg in excluded_packages:
                     # Wheel files are named like: package_name-version-...-.whl
+                    # where version starts with a digit
                     # Normalize both to lowercase and replace _ with - for comparison
                     normalized_filename = filename.lower().replace('_', '-')
                     normalized_pkg = excluded_pkg.lower().replace('_', '-')
+                    
+                    # Check if filename starts with package name followed by '-' and a digit (version)
+                    # This prevents 'torch' from matching 'torch-ema'
                     if normalized_filename.startswith(normalized_pkg + '-'):
-                        wheel_path = tmp_dir / filename
-                        os.remove(wheel_path)
-                        print(f'  Removed: {filename}')
-                        removed_count += 1
-                        # Track the actual package name from the wheel
-                        pkg_name = filename.split('-')[0]
-                        additional_removed_packages.append(pkg_name)
-                        break
+                        # Verify the character after the package name and hyphen is a digit (version number)
+                        char_after_pkg = normalized_filename[len(normalized_pkg) + 1:len(normalized_pkg) + 2]
+                        if char_after_pkg and char_after_pkg.isdigit():
+                            wheel_path = tmp_dir / filename
+                            os.remove(wheel_path)
+                            print(f'  Removed: {filename}')
+                            removed_count += 1
+                            # Track the actual package name from the wheel
+                            pkg_name = filename.split('-')[0]
+                            additional_removed_packages.append(pkg_name)
+                            break
             print(f'Total wheels removed: {removed_count}')
     
     # Now update requirements.txt to remove packages whose wheels were removed
@@ -355,7 +370,7 @@ def manage_datasets():
     verify_config()
 
     # Update dependencies
-    update_dep = input("Would you like to update the dependencies? (Run `uv pip freeze > requirements.txt` first and save as UTF-8) (y/n): ").lower()
+    update_dep = input("Would you like to update the dependencies? (requirements.txt will be auto-compiled from pyproject.toml) (y/n): ").lower()
 
     if update_dep == "y":
         update_dependencies()
