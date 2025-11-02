@@ -132,6 +132,36 @@ class MainTrainer(TorchTrainer, Logger):
             mean=self.mean,
             std=self.std
         )
+    
+    def predict_after_train(
+        self,
+        x: npt.NDArray[np.float32],
+        y: npt.NDArray[np.float32],
+        train_dataset: Dataset[Any],
+        validation_dataset: Dataset[Any],
+        train_indices: list[int],
+        validation_indices: list[int],
+    ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
+        """Predict after training the model.
+
+        :param x: The input to the system.
+        :param y: The expected output of the system.
+        :param train_dataset: The training dataset.
+        :param validation_dataset: The validation dataset.
+        :param train_indices: The indices to train on.
+        :param validation_indices: The indices to validate on.
+
+        :return: The predictions and the expected output.
+        """
+        validation_dataset = self.create_prediction_dataset(x[validation_indices])
+        validation_loader = DataLoader(
+            validation_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            collate_fn=(self.collate_fn if hasattr(validation_dataset, "__getitems__") else None),        )
+
+        return self.predict_on_loader(validation_loader), y[validation_indices]
+
 
     def __post_init__(self) -> None:
         """Initialize EMA after parent initialization."""
@@ -390,6 +420,14 @@ class MainTrainer(TorchTrainer, Logger):
             windows.append((window, slice(start_w, end_w)))
         
         return windows
+
+    def custom_train(self, x: Any, y: Any, **train_args: Any):
+        """Custom training loop for the model. Overwritten to use EMA weights after finishing training."""
+        super().custom_train(x, y, **train_args)
+        
+        # Update EMA weights after training, if not already reverted to best model (which happens if patience != -1)
+        if self.ema is not None and self.patience == -1:
+            self.ema.update()
 
     def _save_model(self, model_path: Path | None = None, *, save_to_external: bool = True, quiet: bool = False) -> None:
         """Save the model with EMA weights for final model, normal weights for checkpoints.
