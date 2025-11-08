@@ -16,10 +16,10 @@ train_sys:
     - _target_: src.modules.training.main_trainer.MainTrainer
       model_name: "BiomassEfficientNetB0SlidingWindow"
       n_folds: 0  # Used during submission only, 0 for doing inference with the train full model, 5 e.g. for fold ensemble.
-      epochs: 75
-      patience: -1
-      batch_size: 16
-      gradient_accumulation_steps: 1
+      epochs: 100
+      patience: 25
+      batch_size: 4
+      gradient_accumulation_steps: 4
       use_mixed_precision: true
       nominal_batch_size: 16
       tta_hflip: true
@@ -28,8 +28,6 @@ train_sys:
       tta_sliding_window: 10  # Split horizontally into overlapping windows during inference
       mean: [0.485, 0.456, 0.406]  # ImageNet normalization
       std: [0.229, 0.224, 0.225]
-      use_ema: true
-      ema_decay: 0.99
       
       model:
         _target_: src.modules.training.models.biomass_model.BiomassModel
@@ -41,6 +39,8 @@ train_sys:
         num_outputs: 5
         compute_aggregates: true
         dropout: 0.3
+        activation:
+          _target_: torch.nn.ReLU
       
       criterion:
         _target_: src.modules.training.losses.WeightedLoss
