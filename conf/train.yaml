@@ -21,7 +21,11 @@ splitter:
   random_state: 42
 
 scorer:
-  _target_: src.scoring.weighted_r2.WeightedR2
-  name: weighted_r2
+  _target_: src.scoring.global_weighted_r2.GlobalWeightedR2
+  name: global_weighted_r2  # New global metric
+  verbose: true
+  log_old_metric: true  # Also log old "weighted_r2" for comparison
+  metadata_path: ${data_path}  # Will load metadata from train.csv
+
 
 allow_multiple_instances: true

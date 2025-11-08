@@ -1,0 +1,113 @@
+defaults:
+  - pipeline/default@_here_
+  - _self_
+
+x_sys:
+  steps:
+    - _target_: src.modules.transformation.image_loader.ImageLoader
+      size: 448
+      preserve_aspect_ratio: true  # Resize so shortest edge is size
+
+y_sys:
+  steps: []
+
+train_sys:
+  steps:
+    - _target_: src.modules.training.main_trainer.MainTrainer
+      model_name: "BiomassEfficientNetB0SlidingWindowGlobal"
+      n_folds: 0  # Used during submission only, 0 for doing inference with the train full model, 5 e.g. for fold ensemble.
+      epochs: 50
+      patience: 25
+      batch_size: 16
+      gradient_accumulation_steps: 1
+      use_mixed_precision: true
+      nominal_batch_size: 16
+      tta_hflip: true
+      tta_vflip: true
+      tta_rotate: true
+      tta_sliding_window: 10  # Split horizontally into overlapping windows during inference
+      mean: [0.485, 0.456, 0.406]  # ImageNet normalization
+      std: [0.229, 0.224, 0.225]
+      
+      model:
+        _target_: src.modules.training.models.biomass_model.BiomassModel
+        backbone:
+          model_name: efficientnet_b3
+          pretrained: true
+          num_classes: 0  # Remove classifier head
+          global_pool: avg
+        num_outputs: 5
+        compute_aggregates: true
+        dropout: 0.3
+        activation:
+          _target_: torch.nn.ReLU
+      
+      # Global Weighted Loss - matches the competition metric formulation
+      criterion:
+        _target_: src.modules.training.losses.GlobalWeightedLoss
+        base_loss:
+          _target_: torch.nn.L1Loss
+        weights: [1.0, 1.0, 1.0, 1.0, 1.0]  # [Dry_Clover_g, Dry_Dead_g, Dry_Green_g, GDM_g, Dry_Total_g]
+        scale_by_variance: true  # Scale by 1/std² to align gradient descent with R² optimization
+        variance_momentum: 0.1  # EWMA momentum (0.1 = 10% new batch, 90% history)
+      
+      optimizer:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: torch.optim.AdamW
+        lr: 5e-4
+        weight_decay: 1e-4
+      
+      scheduler:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: timm.scheduler.cosine_lr.CosineLRScheduler
+        t_initial: ${..epochs}
+        lr_min: 1e-6
+        cycle_mul: 1
+        cycle_decay: 1
+        cycle_limit: 1
+
+      # Augmentations for training - random crop to square 448x448 for data augmentation
+      augmentations:
+        _target_: src.modules.training.augmentation.Augmentation
+        kornia:
+          _target_: kornia.augmentation.AugmentationSequential
+          _args_:
+            - _target_: kornia.augmentation.RandomCrop
+              size: [448, 448]
+            - _target_: kornia.augmentation.RandomHorizontalFlip
+              p: 0.5
+            - _target_: kornia.augmentation.RandomVerticalFlip
+              p: 0.5
+            - _target_: kornia.augmentation.auto.TrivialAugment
+          data_keys:
+            - input
+
+      # Validation augmentations - random crop to square 448x448
+      val_augmentations:
+        _target_: src.modules.training.augmentation.Augmentation
+        kornia:
+          _target_: kornia.augmentation.AugmentationSequential
+          _args_:
+            - _target_: kornia.augmentation.RandomCrop
+              size: [448, 448]
+          data_keys:
+            - input
+      
+      # Global Weighted R² Scorer with verbose logging
+      # Logs breakdown by target, species, and state every epoch
+      # Logs BOTH old (weighted_r2) and new (global_weighted_r2) metrics for comparison
+      scorer:
+        _target_: src.scoring.global_weighted_r2.GlobalWeightedR2
+        name: global_weighted_r2  # New global metric
+        verbose: true
+        log_old_metric: true  # Also log old "weighted_r2" for comparison
+        metadata_path: ${data_path}  # Will load metadata from train.csv
+
+pred_sys:
+  steps: []
+
+

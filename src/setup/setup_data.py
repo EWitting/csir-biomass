@@ -107,3 +107,29 @@ def setup_splitter_data(path: Path) -> np.ndarray:
     unique_images = df[['image_path']].drop_duplicates().reset_index(drop=True)
     
     return unique_images['image_path'].to_numpy()
+
+
+def setup_metadata(path: Path) -> pd.DataFrame:
+    """Load metadata for verbose scoring.
+    
+    Returns DataFrame with State, Species, and other metadata for each image.
+    
+    :param path: Path to train.csv
+    :return: DataFrame with metadata (indexed by image order)
+    """
+    logger.info("Loading metadata from train.csv")
+    
+    df = pd.read_csv(path)
+    
+    # Get metadata for unique images (take first row per image)
+    metadata_df = df.groupby('image_path').first().reset_index()
+    
+    # Select relevant columns
+    metadata_cols = ['image_path', 'State', 'Species', 'Sampling_Date', 'Pre_GSHH_NDVI', 'Height_Ave_cm']
+    metadata = metadata_df[metadata_cols].copy()
+    
+    logger.info(f"Loaded metadata for {len(metadata)} images")
+    logger.info(f"States: {metadata['State'].unique()}")
+    logger.info(f"Species: {metadata['Species'].unique()}")
+    
+    return metadata

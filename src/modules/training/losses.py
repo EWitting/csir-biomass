@@ -1,6 +1,45 @@
 """Custom loss functions for biomass prediction."""
 import torch
 import torch.nn as nn
+import numpy as np
+
+
+def _get_base_loss_repr(base_loss: nn.Module) -> str:
+    """Get string representation of base loss with its parameters.
+    
+    Utility function to avoid code duplication in loss __repr__ methods.
+    
+    :param base_loss: The base loss module
+    :return: String representation like "HuberLoss(delta=1.0, reduction='mean')"
+    """
+    base_loss_class = base_loss.__class__.__name__
+    
+    # Common attributes to check for various loss functions
+    param_attrs = [
+        'delta',  # HuberLoss
+        'reduction',  # Most losses
+        'weight',  # Some losses
+        'size_average',  # Legacy losses
+        'ignore_index',  # CrossEntropyLoss
+        'label_smoothing',  # CrossEntropyLoss
+        'beta',  # SmoothL1Loss
+        'alpha',  # FocalLoss (if used)
+        'gamma',  # FocalLoss (if used)
+    ]
+    
+    base_loss_params = []
+    for attr in param_attrs:
+        if hasattr(base_loss, attr):
+            value = getattr(base_loss, attr)
+            # Only include if not None and not a tensor buffer
+            if value is not None and not isinstance(value, torch.Tensor):
+                base_loss_params.append(f"{attr}={repr(value)}")
+    
+    # Build base_loss repr with its parameters
+    if base_loss_params:
+        return f"{base_loss_class}({', '.join(base_loss_params)})"
+    else:
+        return f"{base_loss_class}()"
 
 
 class WeightedLoss(nn.Module):
@@ -117,41 +156,158 @@ class WeightedLoss(nn.Module):
         
         Ugly, but quick fix for to make the model hashing and reproducibility work properly.
         """
-        # Get base_loss parameters by inspecting its attributes
-        base_loss_params = []
-        base_loss_class = self.base_loss.__class__.__name__
-        
-        # Common attributes to check for various loss functions
-        # These are the parameters that typically influence loss behavior
-        param_attrs = [
-            'delta',  # HuberLoss
-            'reduction',  # Most losses
-            'weight',  # Some losses
-            'size_average',  # Legacy losses
-            'ignore_index',  # CrossEntropyLoss
-            'label_smoothing',  # CrossEntropyLoss
-            'beta',  # SmoothL1Loss
-            'alpha',  # FocalLoss (if used)
-            'gamma',  # FocalLoss (if used)
-        ]
-        
-        for attr in param_attrs:
-            if hasattr(self.base_loss, attr):
-                value = getattr(self.base_loss, attr)
-                # Only include if not None and not a tensor buffer
-                if value is not None and not isinstance(value, torch.Tensor):
-                    base_loss_params.append(f"{attr}={repr(value)}")
-        
-        # Build base_loss repr with its parameters
-        if base_loss_params:
-            base_loss_repr = f"{base_loss_class}({', '.join(base_loss_params)})"
-        else:
-            base_loss_repr = f"{base_loss_class}()"
-        
-        # Convert weight tensor to list for readable repr
+        base_loss_repr = _get_base_loss_repr(self.base_loss)
         weights_list = self.weight_tensor.tolist()
         
-        # Build complete repr
+        return (
+            f"{self.__class__.__name__}(\n"
+            f"  base_loss={base_loss_repr},\n"
+            f"  weights={weights_list},\n"
+            f"  scale_by_variance={self.scale_by_variance},\n"
+            f"  variance_momentum={self.variance_momentum}\n"
+            f")"
+        )
+
+
+class GlobalWeightedLoss(nn.Module):
+    """Global Weighted Loss for multi-output regression.
+    
+    Matches the global weighted R² metric where all (sample, target) pairs
+    are combined into one list with per-row weights.
+    
+    This is mathematically different from WeightedLoss:
+    - WeightedLoss: computes loss per target, then weights
+    - GlobalWeightedLoss: combines all into one list with row weights
+    
+    For R² optimization, this loss approximates minimizing:
+    1 - global_weighted_R² = SS_res / SS_tot (with global weighting)
+    
+    Optionally scales by global weighted variance to align loss magnitude with R² optimization.
+    """
+    
+    def __init__(
+        self,
+        base_loss: nn.Module,
+        weights: list[float] | None = None,
+        scale_by_variance: bool = False,
+        variance_momentum: float = 0.1,
+    ) -> None:
+        """Initialize the global weighted loss.
+        
+        :param base_loss: Base loss function (e.g., MSELoss, HuberLoss)
+        :param weights: Per-target weights (defaults to competition weights)
+        :param scale_by_variance: If True, scales loss by 1/global_var to align magnitude with R²
+        :param variance_momentum: Momentum for EWMA of variance (0.1 = 10% new, 90% old)
+        """
+        super().__init__()
+        
+        self.base_loss = base_loss
+        self.scale_by_variance = scale_by_variance
+        self.variance_momentum = variance_momentum
+        
+        if weights is None:
+            # Default: competition weights
+            # Target order: [Dry_Clover_g, Dry_Dead_g, Dry_Green_g, GDM_g, Dry_Total_g]
+            weights = [0.1, 0.1, 0.1, 0.2, 0.5]
+        
+        # Convert to tensor for efficiency
+        self.register_buffer('weight_tensor', torch.tensor(weights, dtype=torch.float32))
+        
+        # For variance scaling - accumulated via EWMA (global weighted variance)
+        self.register_buffer('running_mean', None)
+        self.register_buffer('running_var', None)
+        self._stats_initialized = False
+    
+    def _update_global_stats(self, y_true: torch.Tensor) -> None:
+        """Update global running statistics using EWMA.
+        
+        Computes global weighted mean and variance across all (sample, target) pairs.
+        
+        :param y_true: Ground truth (B, num_targets)
+        """
+        batch_size, num_targets = y_true.shape
+        
+        # Flatten targets
+        y_true_flat = y_true.reshape(-1)
+        
+        # Create per-row weights (repeat for each sample)
+        weights_flat = self.weight_tensor.repeat(batch_size).to(y_true.device)
+        
+        # Compute weighted global mean and variance
+        weight_sum = torch.sum(weights_flat)
+        batch_mean = torch.sum(weights_flat * y_true_flat) / weight_sum
+        batch_var = torch.sum(weights_flat * (y_true_flat - batch_mean) ** 2) / weight_sum
+        
+        if not self._stats_initialized:
+            # Initialize with first batch
+            self.running_mean = batch_mean
+            self.running_var = batch_var
+            self._stats_initialized = True
+        else:
+            # Update using EWMA: new = momentum * batch + (1 - momentum) * old
+            self.running_mean = (
+                self.variance_momentum * batch_mean +
+                (1 - self.variance_momentum) * self.running_mean
+            )
+            self.running_var = (
+                self.variance_momentum * batch_var +
+                (1 - self.variance_momentum) * self.running_var
+            )
+    
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        """Compute global weighted loss.
+        
+        All (sample, target) pairs are flattened into one list,
+        each weighted by its target type.
+        
+        :param y_pred: Predictions (B, num_targets)
+        :param y_true: Ground truth (B, num_targets)
+        :return: Global weighted loss scalar
+        """
+        # Update running statistics (only during training)
+        if self.scale_by_variance and self.training:
+            self._update_global_stats(y_true)
+        
+        batch_size, num_targets = y_pred.shape
+        
+        # Flatten predictions and targets
+        y_pred_flat = y_pred.reshape(-1)
+        y_true_flat = y_true.reshape(-1)
+        
+        # Create per-row weights (repeat for each sample)
+        weights_flat = self.weight_tensor.repeat(batch_size)
+        
+        # Ensure weights are on the same device
+        weights_flat = weights_flat.to(y_pred.device)
+        
+        # Apply variance scaling if enabled
+        if self.scale_by_variance and self._stats_initialized:
+            # Scale by global std to align loss magnitude with R² optimization
+            std = torch.sqrt(self.running_var + 1e-8)  # Add epsilon for numerical stability
+            y_pred_flat = y_pred_flat / std
+            y_true_flat = y_true_flat / std
+        
+        # Compute loss element-wise
+        # Note: base_loss should have reduction='none' for this to work properly
+        if hasattr(self.base_loss, 'reduction'):
+            original_reduction = self.base_loss.reduction
+            self.base_loss.reduction = 'none'
+            losses = self.base_loss(y_pred_flat, y_true_flat)
+            self.base_loss.reduction = original_reduction
+        else:
+            # If base_loss doesn't have reduction, compute manually
+            losses = (y_pred_flat - y_true_flat) ** 2  # Default to MSE
+        
+        # Apply weights and sum
+        weighted_loss = torch.sum(losses * weights_flat) / torch.sum(weights_flat)
+        
+        return weighted_loss
+    
+    def __repr__(self) -> str:
+        """Custom repr for debugging and reproducibility."""
+        base_loss_repr = _get_base_loss_repr(self.base_loss)
+        weights_list = self.weight_tensor.tolist()
+        
         return (
             f"{self.__class__.__name__}(\n"
             f"  base_loss={base_loss_repr},\n"
