@@ -169,6 +169,67 @@ class WeightedLoss(nn.Module):
         )
 
 
+class TransformedLoss(nn.Module):
+    """Transformed loss wrapper that applies a transformation before computing loss.
+    
+    Applies the same transformation to both predictions and labels before computing loss.
+    Useful for training in transformed space (e.g., log space) without modifying the model.
+    
+    Example: Using log1p transformation with MSE for training in log space:
+        transform = torch.log1p
+        base_loss = torch.nn.MSELoss()
+        loss_fn = TransformedLoss(transform, base_loss)
+    """
+    
+    def __init__(
+        self,
+        transform: callable,
+        base_loss: nn.Module,
+    ) -> None:
+        """Initialize the transformed loss.
+        
+        :param transform: Transformation function to apply before computing loss
+        :param base_loss: Base loss function (e.g., MSELoss, L1Loss)
+        """
+        super().__init__()
+        
+        self.transform = transform
+        self.base_loss = base_loss
+    
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        """Compute loss in transformed space.
+        
+        :param y_pred: Predictions (B, num_targets)
+        :param y_true: Ground truth (B, num_targets)
+        :return: Loss scalar
+        """
+        # Apply transformation to both predictions and targets
+        y_pred_transformed = self.transform(y_pred)
+        y_true_transformed = self.transform(y_true)
+        
+        # Compute loss in transformed space
+        return self.base_loss(y_pred_transformed, y_true_transformed)
+    
+    def __repr__(self) -> str:
+        """Custom repr for debugging and reproducibility."""
+        base_loss_repr = _get_base_loss_repr(self.base_loss)
+        
+        # Try to get a nice string for the transform function
+        if hasattr(self.transform, '__name__'):
+            transform_str = self.transform.__name__
+        elif hasattr(self.transform, '__class__'):
+            transform_str = self.transform.__class__.__name__
+        else:
+            transform_str = str(self.transform)
+        
+        return (
+            f"{self.__class__.__name__}(\n"
+            f"  transform={transform_str},\n"
+            f"  base_loss={base_loss_repr}\n"
+            f")"
+        )
+
+
 class GlobalWeightedLoss(nn.Module):
     """Global Weighted Loss for multi-output regression.
     
