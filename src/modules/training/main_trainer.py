@@ -486,7 +486,12 @@ class MainTrainer(TorchTrainer, Logger):
                         # Generate combinations based on enabled TTA options
                         hflip_options = [False, True] if self.tta_hflip else [False]
                         vflip_options = [False, True] if self.tta_vflip else [False]
-                        rot_options = [0, 1, 2, 3] if self.tta_rotate else [0]
+                        # Optimization: if both hflip and vflip are enabled, only need [0, 1] rotations
+                        # because 180° = hflip+vflip and 270° = 90°+hflip+vflip
+                        if self.tta_rotate:
+                            rot_options = [0, 1] if (self.tta_hflip and self.tta_vflip) else [0, 1, 2, 3]
+                        else:
+                            rot_options = [0]
                         
                         for hflip in hflip_options:
                             for vflip in vflip_options:
