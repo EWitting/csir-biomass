@@ -16,7 +16,7 @@ data_path: data/raw/train.csv
 
 splitter:
   _target_: sklearn.model_selection.KFold
-  n_splits: 5  # 5-fold gives 80-20 train-test split (using first fold)
+  n_splits: 0  # 5-fold gives 80-20 train-test split (using first fold)
   shuffle: true
   random_state: 42
 

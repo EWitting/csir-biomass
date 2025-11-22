@@ -1,0 +1,7 @@
+# Season-State based splitter with 10 folds
+# Groups samples by season-state combinations to prevent temporal and geographical leakage
+_target_: src.modules.splitters.season_state_splitter.SeasonStateSplitter
+data_path: ${data_path}
+n_splits: 10
+shuffle: true
+random_state: 42

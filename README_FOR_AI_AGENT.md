@@ -180,3 +180,6 @@ The data folder contains /raw and /processed. The rule is that /raw is exactly i
 
 # Output folder
 Each run gets an output folder, assigned by Hydra. It is possible to save plots or other outputs to this folder in e.g. as post-processing steps. The main approach however should be to use wandb for logging. The folder can be accessed using `output_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)`
+
+# Programming
+Don't use unicode emojis or characters in .py files, python does not suppoert that encoding.

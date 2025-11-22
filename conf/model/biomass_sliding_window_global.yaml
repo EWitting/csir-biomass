@@ -17,7 +17,7 @@ train_sys:
       model_name: "BiomassEfficientNetB0SlidingWindowGlobal"
       n_folds: 0  # Used during submission only, 0 for doing inference with the train full model, 5 e.g. for fold ensemble.
       epochs: 50
-      patience: 25
+      patience: 50
       batch_size: 16
       gradient_accumulation_steps: 1
       use_mixed_precision: true
@@ -42,9 +42,8 @@ train_sys:
         activation:
           _target_: torch.nn.ReLU
       
-      # Global Weighted Loss - matches the competition metric formulation
       criterion:
-        _target_: src.modules.training.losses.GlobalWeightedLoss
+        _target_: src.modules.training.losses.WeightedLoss
         base_loss:
           _target_: torch.nn.L1Loss
         weights: [1.0, 1.0, 1.0, 1.0, 1.0]  # [Dry_Clover_g, Dry_Dead_g, Dry_Green_g, GDM_g, Dry_Total_g]

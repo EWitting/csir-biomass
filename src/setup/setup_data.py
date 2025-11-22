@@ -109,23 +109,31 @@ def setup_splitter_data(path: Path) -> np.ndarray:
     return unique_images['image_path'].to_numpy()
 
 
-def setup_metadata(path: Path) -> pd.DataFrame:
+def setup_metadata(path: Path) -> pd.DataFrame | None:
     """Load metadata for verbose scoring.
     
     Returns DataFrame with State, Species, and other metadata for each image.
+    Returns None if metadata columns are not available (e.g., during inference).
     
-    :param path: Path to train.csv
-    :return: DataFrame with metadata (indexed by image order)
+    :param path: Path to CSV file (train.csv or test.csv)
+    :return: DataFrame with metadata (indexed by image order), or None if columns missing
     """
-    logger.info("Loading metadata from train.csv")
+    logger.info(f"Attempting to load metadata from {path.name}")
     
     df = pd.read_csv(path)
+    
+    # Check if metadata columns exist (they won't in test.csv)
+    metadata_cols = ['image_path', 'State', 'Species', 'Sampling_Date', 'Pre_GSHH_NDVI', 'Height_Ave_cm']
+    missing_cols = [col for col in metadata_cols if col not in df.columns]
+    
+    if missing_cols:
+        logger.info(f"Metadata columns not available (missing: {missing_cols}). Skipping metadata loading (this is normal during inference).")
+        return None
     
     # Get metadata for unique images (take first row per image)
     metadata_df = df.groupby('image_path').first().reset_index()
     
     # Select relevant columns
-    metadata_cols = ['image_path', 'State', 'Species', 'Sampling_Date', 'Pre_GSHH_NDVI', 'Height_Ave_cm']
     metadata = metadata_df[metadata_cols].copy()
     
     logger.info(f"Loaded metadata for {len(metadata)} images")

@@ -14,12 +14,12 @@ y_sys:
 train_sys:
   steps:
     - _target_: src.modules.training.main_trainer.MainTrainer
-      model_name: "BiomassEfficientNetB0SlidingWindow"
+      model_name: "BiomassEfficientNetB0SlidingWindowGlobal"
       n_folds: 0  # Used during submission only, 0 for doing inference with the train full model, 5 e.g. for fold ensemble.
-      epochs: 100
+      epochs: 75
       patience: 25
-      batch_size: 4
-      gradient_accumulation_steps: 4
+      batch_size: 16
+      gradient_accumulation_steps: 1
       use_mixed_precision: true
       nominal_batch_size: 16
       tta_hflip: true
@@ -69,7 +69,7 @@ train_sys:
         cycle_decay: 1
         cycle_limit: 1
 
-      # Augmentations for training - random crop to square 224x224 for data augmentation
+      # Augmentations for training - random crop to square 448x448 for data augmentation
       augmentations:
         _target_: src.modules.training.augmentation.Augmentation
         kornia:
@@ -85,7 +85,7 @@ train_sys:
           data_keys:
             - input
 
-      # Validation augmentations - random crop to square 224x224
+      # Validation augmentations - random crop to square 448x448
       val_augmentations:
         _target_: src.modules.training.augmentation.Augmentation
         kornia:
@@ -96,11 +96,17 @@ train_sys:
           data_keys:
             - input
       
-      # Scorer for exact validation metric computation
+      # Global Weighted R² Scorer with verbose logging
+      # Logs breakdown by target, species, and state every epoch
+      # Logs BOTH old (weighted_r2) and new (global_weighted_r2) metrics for comparison
       scorer:
-        _target_: src.scoring.weighted_r2.WeightedR2
-        name: weighted_r2
+        _target_: src.scoring.global_weighted_r2.GlobalWeightedR2
+        name: global_weighted_r2  # New global metric
+        verbose: true
+        log_old_metric: true  # Also log old "weighted_r2" for comparison
+        metadata_path: ${data_path}  # Will load metadata from train.csv
 
 pred_sys:
   steps: []
+
 

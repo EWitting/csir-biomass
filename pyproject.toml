@@ -56,6 +56,8 @@ dependencies = [
     "torchvision>=0.18.1",
     "kaggle>=1.7.4.5",
     "torch-ema>=0.3",
+    "lightgbm>=4.6.0",
+    "pulp>=3.3.0",
 ]
 
 

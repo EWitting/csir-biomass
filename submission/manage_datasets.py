@@ -11,7 +11,7 @@ SOURCE_CODE_PATH = Path('./')
 
 # You can specify tm hashes here to exclude them from the source code dataset.
 TM_HASH = [
-    "48e770cd2b34cdf86467014a4315850c",
+    "194dda279928bc96fe069d885d7f2675_0.pt",
 ]
 
 
