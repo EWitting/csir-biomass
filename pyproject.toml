@@ -58,6 +58,7 @@ dependencies = [
     "torch-ema>=0.3",
     "lightgbm>=4.6.0",
     "pulp>=3.3.0",
+    "autogluon-tabular>=1.4.0",
 ]
 
 

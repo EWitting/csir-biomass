@@ -77,25 +77,38 @@ class BiomassModel(nn.Module):
         """
         features = self.backbone(x)
         output = self.head(features)
-        
+
         # Apply optional activation function
         if self.activation is not None:
             output = self.activation(output)
-        
+
         # If compute_aggregates is True, compute GDM and Total from base components
         if self.compute_aggregates:
             # output shape: (B, 3) with [clover, dead, green]
             clover = output[:, 0:1]  # (B, 1)
             dead = output[:, 1:2]    # (B, 1)
             green = output[:, 2:3]   # (B, 1)
-            
+
             # Compute aggregates
             gdm = green + clover     # GDM = Green + Clover
             total = green + clover + dead  # Total = Green + Clover + Dead
-            
+
             # Concatenate to match expected output order
             # [Dry_Clover_g, Dry_Dead_g, Dry_Green_g, GDM_g, Dry_Total_g]
             output = torch.cat([clover, dead, green, gdm, total], dim=1)
-        
+
         return output
+
+    def get_embeddings(self, x):
+        """Extract feature embeddings from the backbone without going through the head.
+
+        This is useful for using the model as a feature extractor for downstream
+        tabular models like AutoGluon.
+
+        :param x: Input images (B, C, H, W)
+        :return: Feature embeddings (B, num_features)
+        """
+        with torch.no_grad():
+            features = self.backbone(x)
+        return features
 

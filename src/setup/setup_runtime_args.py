@@ -16,6 +16,7 @@ def setup_train_args(
     *,
     save_model: bool = False,
     save_model_preds: bool = False,
+    groups: Any = None,
 ) -> dict[str, Any]:
     """Set train arguments for pipeline.
 
@@ -26,6 +27,7 @@ def setup_train_args(
     :param fold: Fold number if it exists
     :param save_model: Whether to save the model to File
     :param save_model_preds: Whether to save the model predictions
+    :param groups: Group labels for stratified bagging/CV
     :return: Dictionary containing arguments
     """
     x_sys = {
@@ -41,9 +43,30 @@ def setup_train_args(
     if fold > -1:
         main_trainer["fold"] = fold
 
+    # Add groups if provided
+    if groups is not None:
+        main_trainer["groups"] = groups
+
     train_sys = {
         "MainTrainer": main_trainer,
     }
+
+    # Also add train args to TabularTrainer if it exists
+    if hasattr(pipeline, 'train_sys') and hasattr(pipeline.train_sys, 'get_steps'):
+        for step in pipeline.train_sys.get_steps():
+            step_name = step.__class__.__name__
+            if step_name == "TabularTrainer":
+                # TabularTrainer needs the same args as MainTrainer
+                tabular_trainer_args = {
+                    "train_indices": train_indices,
+                    "validation_indices": test_indices,
+                    "save_model": save_model,
+                }
+                if fold > -1:
+                    tabular_trainer_args["fold"] = fold
+                if groups is not None:
+                    tabular_trainer_args["groups"] = groups
+                train_sys[step_name] = tabular_trainer_args
 
     if save_model_preds:
         train_sys["cache_args"] = cache_args
@@ -61,7 +84,6 @@ def setup_train_args(
             "ModelPipeline": train_args,
         }
 
-    logger.info("This method [setup_train_args] has not been changed yet, remove log statement when implemented")
     return train_args
 
 

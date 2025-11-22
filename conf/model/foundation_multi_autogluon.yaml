@@ -1,0 +1,49 @@
+defaults:
+  - pipeline/default@_here_
+  - _self_
+
+x_sys:
+  steps:
+    - _target_: src.modules.transformation.image_loader.ImageLoader
+      size: 224
+    - _target_: src.modules.transformation.parallel_feature_concat.ParallelFeatureConcat
+      steps:
+        - _target_: src.modules.transformation.frozen_dinov2.FrozenDinoV2
+          model_name: "dinov2_vitb14"  # 768-dim embeddings
+          batch_size: 64
+          normalize: true
+        - _target_: src.modules.transformation.frozen_siglip.FrozenSigLIP
+          model_name: "vit_base_patch16_siglip_224"  # 768-dim embeddings
+          batch_size: 64
+          normalize: true
+      # Total: 768 + 768 = 1536-dim combined embeddings
+
+y_sys:
+  steps: []
+
+train_sys:
+  steps:
+    - _target_: src.modules.training.tabular_trainer.TabularTrainer
+      model_name: "AutoGluon_MultiFoundation"
+      to_predict: "validation"
+      use_groups: true
+      convert_to_dataframe: true
+      model:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: autogluon.tabular.TabularPredictor
+        label: "biomass"
+        eval_metric: "r2"
+        verbosity: 2
+      fit_kwargs:
+        time_limit: 3600  # 1 hour
+        presets: "best_quality"
+        num_bag_folds: 5
+        num_bag_sets: 1
+        num_stack_levels: 0
+      predict_kwargs:
+        as_pandas: false
+
+pred_sys:
+  steps: []

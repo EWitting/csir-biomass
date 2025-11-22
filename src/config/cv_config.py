@@ -1,4 +1,5 @@
 """Schema for the cross validation configuration."""
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,3 +33,4 @@ class CVConfig:
     splitter: Any
     allow_multiple_instances: bool = False
     save_folds: bool = True
+    use_groups: bool = False

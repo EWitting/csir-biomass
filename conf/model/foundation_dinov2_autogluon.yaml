@@ -1,0 +1,43 @@
+defaults:
+  - pipeline/default@_here_
+  - _self_
+
+x_sys:
+  steps:
+    - _target_: src.modules.transformation.image_loader.ImageLoader
+      size: 224
+    - _target_: src.modules.transformation.frozen_dinov2.FrozenDinoV2
+      model_name: "dinov2_vitb14"  # Base model with 768-dim embeddings
+      batch_size: 64
+      normalize: true  # L2 normalize embeddings
+
+y_sys:
+  steps: []
+
+train_sys:
+  steps:
+    - _target_: src.modules.training.tabular_trainer.TabularTrainer
+      model_name: "AutoGluon_DINOv2"
+      to_predict: "validation"
+      use_groups: true  # Pass groups for stratified bagging
+      convert_to_dataframe: true
+      compute_aggregates: true  # Train 3 models for base targets, compute GDM and Total
+      model:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: autogluon.tabular.TabularPredictor
+        label: "target"  # Label column name (will be created in DataFrame)
+        eval_metric: "r2"
+        verbosity: 2
+        groups: "group_id"  # Column name for groups (will be created in DataFrame)
+        problem_type: "regression"
+      fit_kwargs:
+        time_limit: 360  # 6 minute training time
+        presets: "best_quality"  # Use best quality preset
+        auto_stack: true
+      predict_kwargs:
+        as_pandas: false  # Return numpy array
+
+pred_sys:
+  steps: []

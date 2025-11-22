@@ -1,0 +1,105 @@
+defaults:
+  - pipeline/default@_here_
+  - _self_
+
+x_sys:
+  steps:
+    - _target_: src.modules.transformation.image_loader.ImageLoader
+      size: 224
+
+y_sys:
+  steps: []
+
+train_sys:
+  steps:
+    # Step 1: Train a custom feature extractor and output embeddings
+    - _target_: src.modules.training.main_trainer.MainTrainer
+      model_name: "EfficientNetEmbeddings"
+      return_embeddings: true  # KEY: Return embeddings instead of predictions
+      n_folds: 0  # Not used here, controlled by outer CV
+      epochs: 30
+      patience: 50
+      batch_size: 16
+      gradient_accumulation_steps: 1
+      use_mixed_precision: true
+      nominal_batch_size: 16
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+      to_predict: "all"  # Return embeddings for both train and validation
+
+      model:
+        _target_: src.modules.training.models.biomass_model.BiomassModel
+        backbone:
+          model_name: efficientnet_b0
+          pretrained: true
+          num_classes: 0  # Remove classifier head
+          global_pool: avg
+        num_outputs: 5  # Still need to output 5 values for the loss
+        dropout: 0.3
+
+      criterion:
+        _target_: src.modules.training.losses.WeightedLoss
+        base_loss:
+          _target_: torch.nn.HuberLoss
+          delta: 1.0
+          reduction: mean
+        weights: [0.1, 0.1, 0.1, 0.2, 0.5]
+        scale_by_variance: true
+        variance_momentum: 0.1
+
+      optimizer:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: torch.optim.AdamW
+        lr: 1e-3
+        weight_decay: 1e-4
+
+      scheduler:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: timm.scheduler.cosine_lr.CosineLRScheduler
+        t_initial: ${..epochs}
+        lr_min: 1e-6
+        warmup_t: 3
+        warmup_lr_init: 1e-6
+
+      # Augmentations for training
+      augmentations:
+        _target_: src.modules.training.augmentation.Augmentation
+        kornia:
+          _target_: kornia.augmentation.AugmentationSequential
+          _args_:
+            - _target_: kornia.augmentation.RandomHorizontalFlip
+              p: 0.5
+            - _target_: kornia.augmentation.RandomVerticalFlip
+              p: 0.5
+          data_keys:
+            - input
+
+    # Step 2: Train AutoGluon on the extracted embeddings
+    - _target_: src.modules.training.tabular_trainer.TabularTrainer
+      model_name: "AutoGluon_CustomEmbeddings"
+      to_predict: "validation"
+      use_groups: true
+      convert_to_dataframe: true
+      model:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: autogluon.tabular.TabularPredictor
+        label: "biomass"
+        eval_metric: "r2"
+        verbosity: 2
+      fit_kwargs:
+        time_limit: 1800  # 30 minutes (less than frozen models since embeddings are smaller)
+        presets: "best_quality"
+        num_bag_folds: 5
+        num_bag_sets: 1
+        num_stack_levels: 0
+      predict_kwargs:
+        as_pandas: false
+
+pred_sys:
+  steps: []

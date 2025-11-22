@@ -176,3 +176,5 @@ data/raw
 /lib
 
 .claude
+
+AutogluonModels/

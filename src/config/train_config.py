@@ -32,3 +32,4 @@ class TrainConfig:
     splitter: Any
     test_size: float = 0.2
     allow_multiple_instances: bool = False
+    use_groups: bool = False

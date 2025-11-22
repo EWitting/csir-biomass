@@ -11,7 +11,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 from src.config.train_config import TrainConfig
-from src.setup.setup_data import setup_train_x_data, setup_train_y_data
+from src.setup.setup_data import setup_train_x_data, setup_train_y_data, setup_train_groups
 from src.setup.setup_pipeline import setup_pipeline
 from src.setup.setup_runtime_args import setup_train_args
 from src.setup.setup_wandb import setup_wandb
@@ -77,6 +77,11 @@ def run_train_cfg(cfg: DictConfig) -> None:
     # if not y_cache_exists:
     y = setup_train_y_data(Path(cfg.data_path))
 
+    # Load groups if requested
+    groups = None
+    if cfg.get('use_groups', False):
+        groups = setup_train_groups(Path(cfg.data_path))
+
     # For this simple splitter, we only need y.
     if cfg.test_size == 0:
         if cfg.splitter.n_splits != 0:
@@ -91,7 +96,7 @@ def run_train_cfg(cfg: DictConfig) -> None:
 
     logger.info(f"Train/Test size: {len(train_indices)}/{len(test_indices)}")
     print_section_separator("Train model pipeline")
-    train_args = setup_train_args(pipeline=model_pipeline, cache_args=cache_args, train_indices=train_indices, test_indices=test_indices, save_model=True, fold=fold)
+    train_args = setup_train_args(pipeline=model_pipeline, cache_args=cache_args, train_indices=train_indices, test_indices=test_indices, save_model=True, fold=fold, groups=groups)
     predictions, y_new = model_pipeline.train(X, y, **train_args)
 
     if y is None:

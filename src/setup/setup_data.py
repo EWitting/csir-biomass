@@ -139,5 +139,50 @@ def setup_metadata(path: Path) -> pd.DataFrame | None:
     logger.info(f"Loaded metadata for {len(metadata)} images")
     logger.info(f"States: {metadata['State'].unique()}")
     logger.info(f"Species: {metadata['Species'].unique()}")
-    
+
     return metadata
+
+
+def setup_train_groups(path: Path) -> np.ndarray | None:
+    """Create group labels for stratified splitting and bagging.
+
+    Groups are created by combining season (derived from Sampling_Date) and State.
+    This ensures that samples from the same geographical and temporal context
+    are kept together during cross-validation and bagging.
+
+    :param path: Path to train.csv
+    :return: Array of group IDs (n_images,), or None if groups cannot be created
+    """
+    logger.info("Creating group labels for stratified splitting")
+
+    df = pd.read_csv(path)
+
+    # Check if required columns exist
+    required_cols = ['image_path', 'State', 'Sampling_Date']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+
+    if missing_cols:
+        logger.warning(f"Cannot create groups (missing columns: {missing_cols}). Groups will not be used.")
+        return None
+
+    # Get unique images with their metadata
+    unique_df = df.groupby('image_path').first().reset_index()
+
+    # Extract season from Sampling_Date
+    from src.modules.splitters.season_state_splitter import month_to_season
+    unique_df['season'] = pd.to_datetime(unique_df['Sampling_Date']).dt.month.map(month_to_season)
+
+    # Create season-state combination group labels
+    unique_df['season_state_group'] = unique_df['season'] + '_' + unique_df['State']
+
+    # Convert to numeric labels
+    group_labels, unique_groups = pd.factorize(unique_df['season_state_group'])
+
+    logger.info(f"Created {len(unique_groups)} unique groups")
+    logger.info(f"Groups: {list(unique_groups)}")
+
+    # Count samples per group
+    group_counts = pd.Series(group_labels).value_counts().sort_index()
+    logger.info(f"Samples per group: {dict(zip(unique_groups, group_counts.values))}")
+
+    return group_labels.astype(np.int32)

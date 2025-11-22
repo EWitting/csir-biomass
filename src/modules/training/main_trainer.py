@@ -42,7 +42,10 @@ class MainTrainer(TorchTrainer, Logger):
     # EMA (Exponential Moving Average) parameters
     use_ema: bool = field(default=False, init=True, repr=True, compare=False)  # Enable EMA smoothing
     ema_decay: float = field(default=0.99, init=True, repr=True, compare=False)  # EMA decay rate (0.99 = smooth over ~100 steps)
-    
+
+    # Embedding extraction mode (for using model as feature extractor)
+    return_embeddings: bool = field(default=False, init=True, repr=True, compare=False)  # Return embeddings instead of predictions
+
     # For storing validation indices to pass to scorer
     _current_validation_indices: Optional[list[int]] = field(default=None, init=False, repr=False, compare=False)
     _current_epoch: int = field(default=0, init=False, repr=False, compare=False)
@@ -456,8 +459,11 @@ class MainTrainer(TorchTrainer, Logger):
 
         :param loader: The loader to predict on
         :param compile_method: Compilation method (unused)
-        :return: The predictions
+        :return: The predictions (or embeddings if return_embeddings=True)
         """
+        if self.return_embeddings:
+            return self._extract_embeddings(loader)
+
         self.log_to_terminal("Running inference on the given dataloader")
         self.model.eval()
         predictions = []
@@ -587,3 +593,44 @@ class MainTrainer(TorchTrainer, Logger):
                 self.model.module.load_state_dict(model.state_dict())
             else:
                 self.model.load_state_dict(model.state_dict())
+
+    def _extract_embeddings(
+        self,
+        loader: DataLoader[tuple[Tensor, ...]],
+    ) -> npt.NDArray[np.float32]:
+        """Extract feature embeddings from the model instead of predictions.
+
+        Used when return_embeddings=True. This allows the model to be used as a
+        feature extractor for downstream tabular models.
+
+        :param loader: The loader to extract embeddings from
+        :return: Feature embeddings (N, embedding_dim)
+        """
+        self.log_to_terminal("Extracting embeddings from model")
+        self.model.eval()
+        all_embeddings = []
+
+        with torch.no_grad(), tqdm(loader, unit="batch", desc="Extracting embeddings") as tepoch:
+            for data in tepoch:
+                X_batch = batch_to_device(data[0], self.x_tensor_type, self.device)
+
+                # Extract embeddings using the model's get_embeddings method
+                if hasattr(self.model, 'get_embeddings'):
+                    embeddings = self.model.get_embeddings(X_batch)
+                elif hasattr(self.model, 'module') and hasattr(self.model.module, 'get_embeddings'):
+                    # Handle DataParallel wrapper
+                    embeddings = self.model.module.get_embeddings(X_batch)
+                else:
+                    raise AttributeError(
+                        f"Model {self.model.__class__.__name__} does not have a get_embeddings method. "
+                        "Please implement it to support embedding extraction mode."
+                    )
+
+                all_embeddings.append(embeddings.cpu().numpy())
+
+        # Concatenate all batches
+        embeddings = np.concatenate(all_embeddings, axis=0)
+
+        self.log_to_terminal(f"Extracted embeddings with shape {embeddings.shape}")
+
+        return embeddings
