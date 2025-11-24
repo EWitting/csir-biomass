@@ -22,6 +22,6 @@ scorer:
   log_old_metric: true  # Also log old "weighted_r2" for comparison
   metadata_path: ${data_path}  # Will load metadata from train.csv
 
-use_groups: false  # Whether to use groups for stratified splitting/bagging
+use_groups: true  # Whether to use groups for stratified splitting/bagging
 
 allow_multiple_instances: true

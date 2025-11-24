@@ -1,0 +1,58 @@
+defaults:
+  - pipeline/default@_here_
+  - _self_
+
+x_sys:
+  steps:
+    - _target_: src.modules.transformation.image_loader.ImageLoader
+      size: 224  # Standard resolution for faster training
+      preserve_aspect_ratio: true  # Keep 2:1 aspect ratio for biomass images
+    - _target_: src.modules.transformation.parallel_feature_concat.ParallelFeatureConcat
+      steps:
+        - _target_: src.modules.transformation.frozen_dinov3.FrozenDinoV3
+          model_name: "facebook/dinov3-vits16-pretrain-lvd1689m"  # Small: 384 dim
+          batch_size: 32
+          normalize: true
+        - _target_: src.modules.transformation.frozen_timm.FrozenTimm
+          model_name: "eva02_small_patch14_224.mim_in22k"  # Small: 384 dim @ native 224px
+          batch_size: 32
+          normalize: true
+        - _target_: src.modules.transformation.frozen_timm.FrozenTimm
+          model_name: "vit_base_patch16_siglip_224"  # Base: 768 dim @ native 224px
+          batch_size: 32
+          normalize: true
+      # Total: 384 + 384 + 768 = 1536-dim combined embeddings
+      # Smaller models for faster feature extraction and training
+
+y_sys:
+  steps: []
+
+train_sys:
+  steps:
+    - _target_: src.modules.training.tabular_trainer.TabularTrainer
+      model_name: "AutoGluon_Ensemble_224_Fast"
+      to_predict: "validation"
+      use_groups: true
+      convert_to_dataframe: true
+      compute_aggregates: true
+      model:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: autogluon.tabular.TabularPredictor
+        label: "target"
+        eval_metric: "r2"
+        verbosity: 2
+        groups: "group_id"
+        problem_type: "regression"
+      fit_kwargs:
+        time_limit: 1800  # 30 minutes
+        presets: "good_quality"  # Faster preset
+        num_bag_folds: 3  # Fewer folds for speed
+        num_bag_sets: 1
+        num_stack_levels: 0
+      predict_kwargs:
+        as_pandas: false
+
+pred_sys:
+  steps: []

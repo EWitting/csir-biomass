@@ -1,26 +1,27 @@
 """Module for biomass training block."""
-from dataclasses import dataclass, field
-from typing import Optional, Any
+
 import contextlib
 import copy
 import gc
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
 
-import wandb
-import torch
 import numpy as np
 import numpy.typing as npt
-from torch import nn, Tensor
-from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
+import torch
+import wandb
+from epochlib.data import Data
 from epochlib.training import TorchTrainer
 from epochlib.training.utils import batch_to_device
-from epochlib.data import Data
+from torch import Tensor, nn
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 
 from src.modules.logging.logger import Logger
 from src.modules.training.augmentation import Augmentation
 from src.modules.training.dataset import AugmentedDataset
 from src.scoring.scorer import Scorer
-from pathlib import Path
 
 
 @dataclass
@@ -33,21 +34,31 @@ class MainTrainer(TorchTrainer, Logger):
     tta_hflip: bool = field(default=False, init=True, repr=False, compare=False)
     tta_vflip: bool = field(default=False, init=True, repr=False, compare=False)
     tta_rotate: bool = field(default=False, init=True, repr=False, compare=False)
-    tta_sliding_window: int = field(default=1, init=True, repr=False, compare=False)  # Number of horizontal sliding window slices for inference
+    tta_sliding_window: int = field(
+        default=1, init=True, repr=False, compare=False
+    )  # Number of horizontal sliding window slices for inference
     nominal_batch_size: int = field(default=16, init=True, repr=False, compare=False)
     scorer: Optional[Scorer] = None  # For exact validation metric computation
     mean: tuple[float, float, float] = (0.485, 0.456, 0.406)  # Normalization mean
     std: tuple[float, float, float] = (0.229, 0.224, 0.225)  # Normalization std
-    
+
     # EMA (Exponential Moving Average) parameters
-    use_ema: bool = field(default=False, init=True, repr=True, compare=False)  # Enable EMA smoothing
-    ema_decay: float = field(default=0.99, init=True, repr=True, compare=False)  # EMA decay rate (0.99 = smooth over ~100 steps)
+    use_ema: bool = field(
+        default=False, init=True, repr=True, compare=False
+    )  # Enable EMA smoothing
+    ema_decay: float = field(
+        default=0.99, init=True, repr=True, compare=False
+    )  # EMA decay rate (0.99 = smooth over ~100 steps)
 
     # Embedding extraction mode (for using model as feature extractor)
-    return_embeddings: bool = field(default=False, init=True, repr=True, compare=False)  # Return embeddings instead of predictions
+    return_embeddings: bool = field(
+        default=False, init=True, repr=False, compare=False
+    )  # Return embeddings instead of predictions
 
     # For storing validation indices to pass to scorer
-    _current_validation_indices: Optional[list[int]] = field(default=None, init=False, repr=False, compare=False)
+    _current_validation_indices: Optional[list[int]] = field(
+        default=None, init=False, repr=False, compare=False
+    )
     _current_epoch: int = field(default=0, init=False, repr=False, compare=False)
 
     def create_datasets(
@@ -72,7 +83,7 @@ class MainTrainer(TorchTrainer, Logger):
                 self.augmentations,
                 device=self.device,
                 mean=self.mean,
-                std=self.std
+                std=self.std,
             )
             validation_dataset = AugmentedDataset(
                 torch.from_numpy(x[validation_indices]),
@@ -80,11 +91,13 @@ class MainTrainer(TorchTrainer, Logger):
                 self.val_augmentations,
                 device=self.device,
                 mean=self.mean,
-                std=self.std
+                std=self.std,
             )
             return train_dataset, validation_dataset
 
-        return self.dataset(x[train_indices], y[train_indices]), self.dataset(x[validation_indices], y[validation_indices])
+        return self.dataset(x[train_indices], y[train_indices]), self.dataset(
+            x[validation_indices], y[validation_indices]
+        )
 
     def _concat_datasets(
         self,
@@ -107,7 +120,7 @@ class MainTrainer(TorchTrainer, Logger):
             augmentation=None,
             device=self.device,
             mean=self.mean,
-            std=self.std
+            std=self.std,
         )
 
     def create_prediction_dataset(
@@ -125,20 +138,20 @@ class MainTrainer(TorchTrainer, Logger):
             x_tensor = torch.from_numpy(x)
         else:
             x_tensor = torch.tensor(x, dtype=self.x_tensor_type)
-        
+
         # Use AugmentedDataset without augmentations (only normalization)
         # Create dummy targets for the dataset (not used during inference)
         dummy_y = torch.zeros((len(x_tensor), 1), dtype=torch.float32)
-        
+
         return AugmentedDataset(
             x_tensor,
             dummy_y,
             augmentation=None,
             device=self.device,
             mean=self.mean,
-            std=self.std
+            std=self.std,
         )
-    
+
     def predict_after_train(
         self,
         x: npt.NDArray[np.float32],
@@ -157,17 +170,46 @@ class MainTrainer(TorchTrainer, Logger):
         :param train_indices: The indices to train on.
         :param validation_indices: The indices to validate on.
 
-        :return: The predictions and the expected output.
+        :return: The predictions (or embeddings) and the expected output.
         """
-        validation_dataset = self.create_prediction_dataset(x[validation_indices])
-        validation_loader = DataLoader(
-            validation_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            collate_fn=(self.collate_fn if hasattr(validation_dataset, "__getitems__") else None),        )
-
-        return self.predict_on_loader(validation_loader), y[validation_indices]
-
+        # Respect to_predict parameter, especially important for return_embeddings=True
+        match self.to_predict:
+            case "all":
+                # Return predictions/embeddings for ALL data (train + validation)
+                concat_dataset: Dataset[Any] = self._concat_datasets(
+                    train_dataset,
+                    validation_dataset,
+                    train_indices,
+                    validation_indices,
+                )
+                pred_dataloader = DataLoader(
+                    concat_dataset,
+                    batch_size=self.batch_size,
+                    shuffle=False,
+                    collate_fn=(
+                        self.collate_fn if hasattr(concat_dataset, "__getitems__") else None
+                    ),
+                    **self.dataloader_args,
+                )
+                return self.predict_on_loader(pred_dataloader), y
+            case "validation":
+                # Return predictions/embeddings for validation data only
+                validation_dataset = self.create_prediction_dataset(x[validation_indices])
+                validation_loader = DataLoader(
+                    validation_dataset,
+                    batch_size=self.batch_size,
+                    shuffle=False,
+                    collate_fn=(
+                        self.collate_fn if hasattr(validation_dataset, "__getitems__") else None
+                    ),
+                    **self.dataloader_args,
+                )
+                return self.predict_on_loader(validation_loader), y[validation_indices]
+            case "none":
+                # Return original data
+                return x, y
+            case _:
+                raise ValueError("to_predict should be either 'validation', 'all' or 'none'")
 
     def train_one_epoch(
         self,
@@ -247,7 +289,7 @@ class MainTrainer(TorchTrainer, Logger):
         start_epoch: int = 0,
     ) -> None:
         """Override training loop to track validation indices and epoch for verbose scoring.
-        
+
         :param train_loader: Dataloader for the training data.
         :param validation_loader: Dataloader for the validation data. (can be empty)
         :param train_losses: List of train losses.
@@ -260,25 +302,46 @@ class MainTrainer(TorchTrainer, Logger):
         if fold > -1:
             fold_no = f"_{fold}"
 
-        self.external_define_metric(self.wrap_log(f"Training/Train Loss{fold_no}"), self.wrap_log("epoch"))
-        self.external_define_metric(self.wrap_log(f"Validation/Validation Loss{fold_no}"), self.wrap_log("epoch"))
-        
+        self.external_define_metric(
+            self.wrap_log(f"Training/Train Loss{fold_no}"), self.wrap_log("epoch")
+        )
+        self.external_define_metric(
+            self.wrap_log(f"Validation/Validation Loss{fold_no}"),
+            self.wrap_log("epoch"),
+        )
+
         # Define metrics for scorer if available
         if self.scorer is not None:
             # Define the main scorer metric (new global R²)
-            self.external_define_metric(self.wrap_log(f"Validation/{self.scorer.name}"), self.wrap_log("epoch"))
-            
+            self.external_define_metric(
+                self.wrap_log(f"Validation/{self.scorer.name}"), self.wrap_log("epoch")
+            )
+
             # Define verbose metrics if scorer has verbose mode
-            if hasattr(self.scorer, 'verbose') and self.scorer.verbose:
+            if hasattr(self.scorer, "verbose") and self.scorer.verbose:
                 # Define old method metric (for comparison with historical runs)
-                if hasattr(self.scorer, 'log_old_metric') and self.scorer.log_old_metric:
-                    self.external_define_metric(self.wrap_log("Validation/weighted_r2"), self.wrap_log("epoch"))
-                
+                if (
+                    hasattr(self.scorer, "log_old_metric")
+                    and self.scorer.log_old_metric
+                ):
+                    self.external_define_metric(
+                        self.wrap_log("Validation/weighted_r2"), self.wrap_log("epoch")
+                    )
+
                 # Define per-target metrics
-                target_names = ['Dry_Clover_g', 'Dry_Dead_g', 'Dry_Green_g', 'GDM_g', 'Dry_Total_g']
+                target_names = [
+                    "Dry_Clover_g",
+                    "Dry_Dead_g",
+                    "Dry_Green_g",
+                    "GDM_g",
+                    "Dry_Total_g",
+                ]
                 for target_name in target_names:
-                    self.external_define_metric(self.wrap_log(f"Validation/R2_target/{target_name}"), self.wrap_log("epoch"))
-                
+                    self.external_define_metric(
+                        self.wrap_log(f"Validation/R2_target/{target_name}"),
+                        self.wrap_log("epoch"),
+                    )
+
                 # Define per-species and per-state metrics (will be created dynamically as encountered)
                 # These get defined by wandb automatically when first logged with epoch
 
@@ -289,7 +352,7 @@ class MainTrainer(TorchTrainer, Logger):
         for epoch in range(start_epoch, self.epochs):
             # Store current epoch for scorer access
             self._current_epoch = epoch
-            
+
             # Train using train_loader
             train_loss = self.train_one_epoch(train_loader, epoch)
             self.log_to_debug(f"Epoch {epoch} Train Loss: {train_loss}")
@@ -310,10 +373,17 @@ class MainTrainer(TorchTrainer, Logger):
             # Checkpointing
             if self.checkpointing_enabled:
                 # Save checkpoint
-                self._save_model(self.get_model_checkpoint_path(epoch), save_to_external=False, quiet=True)
+                self._save_model(
+                    self.get_model_checkpoint_path(epoch),
+                    save_to_external=False,
+                    quiet=True,
+                )
 
                 # Remove old checkpoints
-                if (self.checkpointing_keep_every == 0 or epoch % self.checkpointing_keep_every != 0) and self.get_model_checkpoint_path(epoch - 1).exists():
+                if (
+                    self.checkpointing_keep_every == 0
+                    or epoch % self.checkpointing_keep_every != 0
+                ) and self.get_model_checkpoint_path(epoch - 1).exists():
                     self.get_model_checkpoint_path(epoch - 1).unlink()
 
             # Compute validation loss
@@ -328,7 +398,9 @@ class MainTrainer(TorchTrainer, Logger):
                 # Log validation loss and plot train/val loss against each other
                 self.log_to_external(
                     message={
-                        self.wrap_log(f"Validation/Validation Loss{fold_no}"): val_losses[-1],
+                        self.wrap_log(
+                            f"Validation/Validation Loss{fold_no}"
+                        ): val_losses[-1],
                         self.wrap_log("epoch"): epoch,
                     },
                 )
@@ -351,12 +423,17 @@ class MainTrainer(TorchTrainer, Logger):
 
                 # Early stopping
                 if self._early_stopping():
-                    self.log_to_external(message={self.wrap_log(f"Epochs{fold_no}"): (epoch + 1) - self.patience})
+                    self.log_to_external(
+                        message={
+                            self.wrap_log(f"Epochs{fold_no}"): (epoch + 1)
+                            - self.patience
+                        }
+                    )
                     break
 
             # Log the trained epochs to wandb if we finished training
             self.log_to_external(message={self.wrap_log(f"Epochs{fold_no}"): epoch + 1})
-    
+
     def train(
         self,
         x: npt.NDArray[np.float32] | Data,
@@ -366,7 +443,7 @@ class MainTrainer(TorchTrainer, Logger):
         **kwargs: Any,
     ) -> tuple[npt.NDArray[np.float32] | None, npt.NDArray[np.float32] | None]:
         """Override train to store validation indices for scorer access.
-        
+
         :param x: The input to the system.
         :param y: The expected output of the system.
         :param train_indices: The indices to train on.
@@ -375,10 +452,20 @@ class MainTrainer(TorchTrainer, Logger):
         :return: The predictions and the expected output.
         """
         # Store validation indices for scorer access
-        self._current_validation_indices = list(validation_indices) if not isinstance(validation_indices, list) else validation_indices
-        
+        self._current_validation_indices = (
+            list(validation_indices)
+            if not isinstance(validation_indices, list)
+            else validation_indices
+        )
+
         # Call parent train method - pass indices through kwargs, not as positional args
-        return super().train(x, y, train_indices=train_indices, validation_indices=validation_indices, **kwargs)
+        return super().train(
+            x,
+            y,
+            train_indices=train_indices,
+            validation_indices=validation_indices,
+            **kwargs,
+        )
 
     def val_one_epoch(
         self,
@@ -394,14 +481,14 @@ class MainTrainer(TorchTrainer, Logger):
         :param desc: Description for the tqdm progress bar.
         :return: Competition metric score (or average loss if no scorer provided)
         """
-        
+
         losses = []
         all_preds = []
         all_labels = []
-        
+
         self.model.eval()
         pbar = tqdm(dataloader, unit="batch")
-        
+
         with torch.no_grad():
             for batch in pbar:
                 X_batch, y_batch = batch
@@ -417,28 +504,32 @@ class MainTrainer(TorchTrainer, Logger):
                 losses.append(loss.item())
                 all_preds.append(y_pred.cpu())
                 all_labels.append(y_batch.cpu())
-                
+
                 # Update progress bar with average loss
                 avg_loss = sum(losses) / len(losses)
                 pbar.set_description(desc=desc)
                 pbar.set_postfix(loss=avg_loss)
-        
+
         avg_loss = sum(losses) / len(losses)
-        
+
         # Compute exact metric if scorer is provided
         if self.scorer is not None:
             all_preds = torch.cat(all_preds, dim=0).numpy()
             all_labels = torch.cat(all_labels, dim=0).numpy()
-            
+
             # Pass epoch, indices, and logger to scorer for verbose logging
             metric_score = self.scorer(
                 all_labels,
                 all_preds,
                 epoch=self._current_epoch,
-                indices=np.array(self._current_validation_indices) if self._current_validation_indices else None,
+                indices=(
+                    np.array(self._current_validation_indices)
+                    if self._current_validation_indices
+                    else None
+                ),
                 logger=self,
             )
-            
+
             # Log main metric to wandb with epoch
             self.log_to_external(
                 message={
@@ -446,7 +537,7 @@ class MainTrainer(TorchTrainer, Logger):
                     self.wrap_log("epoch"): self._current_epoch,
                 }
             )
-        
+
         # Always return the loss for early stopping and tracking
         return avg_loss
 
@@ -462,9 +553,11 @@ class MainTrainer(TorchTrainer, Logger):
         :return: The predictions (or embeddings if return_embeddings=True)
         """
         if self.return_embeddings:
-            return self._extract_embeddings(loader)
-
-        self.log_to_terminal("Running inference on the given dataloader")
+            self.log_to_terminal(
+                "Extracting embeddings with TTA from the given dataloader"
+            )
+        else:
+            self.log_to_terminal("Running inference on the given dataloader")
         self.model.eval()
         predictions = []
 
@@ -473,21 +566,32 @@ class MainTrainer(TorchTrainer, Logger):
             loader.dataset,
             batch_size=loader.batch_size,
             shuffle=False,
-            collate_fn=(self.collate_fn if hasattr(loader.dataset, "__getitems__") else None),
+            collate_fn=(
+                self.collate_fn if hasattr(loader.dataset, "__getitems__") else None
+            ),
             **self.dataloader_args,
         )
 
         with torch.no_grad(), tqdm(loader, unit="batch", disable=False) as tepoch:
             for data in tepoch:
                 X_batch = batch_to_device(data[0], self.x_tensor_type, self.device)
-                
-                if self.tta_sliding_window > 1 or self.tta_hflip or self.tta_vflip or self.tta_rotate:
+
+                if (
+                    self.tta_sliding_window > 1
+                    or self.tta_hflip
+                    or self.tta_vflip
+                    or self.tta_rotate
+                ):
                     # Test-time augmentation for regression
                     all_preds = []
-                    
+
                     # Sliding window is the outer loop - for each window, apply TTA
-                    windows = self._get_sliding_windows(X_batch) if self.tta_sliding_window > 1 else [(X_batch, slice(None))]
-                    
+                    windows = (
+                        self._get_sliding_windows(X_batch)
+                        if self.tta_sliding_window > 1
+                        else [(X_batch, slice(None))]
+                    )
+
                     for window, _ in windows:
                         # Generate combinations based on enabled TTA options
                         hflip_options = [False, True] if self.tta_hflip else [False]
@@ -495,104 +599,151 @@ class MainTrainer(TorchTrainer, Logger):
                         # Optimization: if both hflip and vflip are enabled, only need [0, 1] rotations
                         # because 180° = hflip+vflip and 270° = 90°+hflip+vflip
                         if self.tta_rotate:
-                            rot_options = [0, 1] if (self.tta_hflip and self.tta_vflip) else [0, 1, 2, 3]
+                            rot_options = (
+                                [0, 1]
+                                if (self.tta_hflip and self.tta_vflip)
+                                else [0, 1, 2, 3]
+                            )
                         else:
                             rot_options = [0]
-                        
+
                         for hflip in hflip_options:
                             for vflip in vflip_options:
                                 for rot in rot_options:
                                     window_transformed = window.clone()
-                                    
+
                                     # Apply transformations to this window
                                     if hflip:
-                                        window_transformed = torch.flip(window_transformed, dims=[3])  # Flip width (horizontal)
+                                        window_transformed = torch.flip(
+                                            window_transformed, dims=[3]
+                                        )  # Flip width (horizontal)
                                     if vflip:
-                                        window_transformed = torch.flip(window_transformed, dims=[2])  # Flip height (vertical)
+                                        window_transformed = torch.flip(
+                                            window_transformed, dims=[2]
+                                        )  # Flip height (vertical)
                                     if rot != 0:
-                                        window_transformed = torch.rot90(window_transformed, k=rot, dims=[2, 3])
-                                    
-                                    # Predict on transformed window
-                                    y_pred = self.model(window_transformed)
+                                        window_transformed = torch.rot90(
+                                            window_transformed, k=rot, dims=[2, 3]
+                                        )
+
+                                    # Predict on transformed window (or extract embeddings)
+                                    if self.return_embeddings:
+                                        if hasattr(self.model, "get_embeddings"):
+                                            y_pred = self.model.get_embeddings(
+                                                window_transformed
+                                            )
+                                        elif hasattr(self.model, "module") and hasattr(
+                                            self.model.module, "get_embeddings"
+                                        ):
+                                            y_pred = self.model.module.get_embeddings(
+                                                window_transformed
+                                            )
+                                        else:
+                                            raise AttributeError(
+                                                f"Model {self.model.__class__.__name__} does not have a get_embeddings method."
+                                            )
+                                    else:
+                                        y_pred = self.model(window_transformed)
                                     all_preds.append(y_pred)
-                    
+
                     # Average all predictions (across all windows and TTA variants)
                     pred = torch.mean(torch.stack(all_preds), dim=0)
                     predictions.extend(pred.cpu().numpy())
                 else:
-                    y_pred = self.model(X_batch).cpu().numpy()
+                    # No TTA - just predict normally (or extract embeddings)
+                    if self.return_embeddings:
+                        if hasattr(self.model, "get_embeddings"):
+                            y_pred = self.model.get_embeddings(X_batch).cpu().numpy()
+                        elif hasattr(self.model, "module") and hasattr(
+                            self.model.module, "get_embeddings"
+                        ):
+                            y_pred = (
+                                self.model.module.get_embeddings(X_batch).cpu().numpy()
+                            )
+                        else:
+                            raise AttributeError(
+                                f"Model {self.model.__class__.__name__} does not have a get_embeddings method."
+                            )
+                    else:
+                        y_pred = self.model(X_batch).cpu().numpy()
                     predictions.extend(y_pred)
-        
+
         return np.array(predictions)
-    
+
     def _get_sliding_windows(self, X_batch: Tensor) -> list[tuple[Tensor, slice]]:
         """Extract sliding windows from horizontally wide images.
-        
+
         Assumes images are wider than they are tall (2:1 aspect ratio or similar).
         Splits the image into multiple overlapping windows.
-        
+
         :param X_batch: Input batch (B, C, H, W)
         :return: List of (window_tensor, slice) tuples
         """
         B, C, H, W = X_batch.shape
-        
+
         # If image is square or portrait, return the full image
         if W <= H:
             return [(X_batch, slice(None))]
-        
+
         # Calculate window size (square)
         window_size = H
-        
+
         # Calculate stride for overlapping windows
         # Distribute windows evenly across the width with overlap
-        stride = (W - window_size) // (self.tta_sliding_window - 1) if self.tta_sliding_window > 1 else W
-        
+        stride = (
+            (W - window_size) // (self.tta_sliding_window - 1)
+            if self.tta_sliding_window > 1
+            else W
+        )
+
         windows = []
         for i in range(self.tta_sliding_window):
             # Calculate window start position
             start_w = min(i * stride, W - window_size)
             end_w = start_w + window_size
-            
+
             # Extract window
             window = X_batch[:, :, :, start_w:end_w]
             windows.append((window, slice(start_w, end_w)))
-        
+
         return windows
 
     def save_model_to_external(self) -> None:
         """Save the model to external storage."""
         if wandb.run:
             model_artifact = wandb.Artifact(self.model_name, type="model")
-            model_artifact.add_file(f"{self.trained_models_directory}/{self.get_hash()}.pt")
+            model_artifact.add_file(
+                f"{self.trained_models_directory}/{self.get_hash()}.pt"
+            )
             wandb.log_artifact(model_artifact)
 
     def _load_model(self, path: Path | None = None) -> None:
-            """Load the model from the model_directory folder."""
-            model_path = path if path is not None else self.get_model_path()
+        """Load the model from the model_directory folder."""
+        model_path = path if path is not None else self.get_model_path()
 
-            # Check if the model exists
-            if not model_path.exists():
-                raise FileNotFoundError(
-                    f"Model not found in {model_path}",
-                )
-
-            # Load model
-            self.log_to_terminal(
-                f"Loading model from {model_path}",
+        # Check if the model exists
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Model not found in {model_path}",
             )
-            checkpoint = torch.load(model_path, weights_only=False)
 
-            # Load the weights from the checkpoint
-            if isinstance(checkpoint, nn.DataParallel):
-                model = checkpoint.module
-            else:
-                model = checkpoint
+        # Load model
+        self.log_to_terminal(
+            f"Loading model from {model_path}",
+        )
+        checkpoint = torch.load(model_path, weights_only=False)
 
-            # Set the current model to the loaded model
-            if isinstance(self.model, nn.DataParallel):
-                self.model.module.load_state_dict(model.state_dict())
-            else:
-                self.model.load_state_dict(model.state_dict())
+        # Load the weights from the checkpoint
+        if isinstance(checkpoint, nn.DataParallel):
+            model = checkpoint.module
+        else:
+            model = checkpoint
+
+        # Set the current model to the loaded model
+        if isinstance(self.model, nn.DataParallel):
+            self.model.module.load_state_dict(model.state_dict())
+        else:
+            self.model.load_state_dict(model.state_dict())
 
     def _extract_embeddings(
         self,
@@ -610,14 +761,19 @@ class MainTrainer(TorchTrainer, Logger):
         self.model.eval()
         all_embeddings = []
 
-        with torch.no_grad(), tqdm(loader, unit="batch", desc="Extracting embeddings") as tepoch:
+        with (
+            torch.no_grad(),
+            tqdm(loader, unit="batch", desc="Extracting embeddings") as tepoch,
+        ):
             for data in tepoch:
                 X_batch = batch_to_device(data[0], self.x_tensor_type, self.device)
 
                 # Extract embeddings using the model's get_embeddings method
-                if hasattr(self.model, 'get_embeddings'):
+                if hasattr(self.model, "get_embeddings"):
                     embeddings = self.model.get_embeddings(X_batch)
-                elif hasattr(self.model, 'module') and hasattr(self.model.module, 'get_embeddings'):
+                elif hasattr(self.model, "module") and hasattr(
+                    self.model.module, "get_embeddings"
+                ):
                     # Handle DataParallel wrapper
                     embeddings = self.model.module.get_embeddings(X_batch)
                 else:

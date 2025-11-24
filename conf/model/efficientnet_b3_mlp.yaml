@@ -1,0 +1,73 @@
+defaults:
+  - pipeline/default@_here_
+  - _self_
+
+x_sys:
+  steps:
+    - _target_: src.modules.transformation.image_loader.ImageLoader
+      size: 448  # EfficientNet-B3 native size is 300, but use 448 for consistency
+      preserve_aspect_ratio: true  # Keep 2:1 aspect ratio for biomass images
+    - _target_: src.modules.transformation.frozen_timm.FrozenTimm
+      model_name: "efficientnet_b3"  # 1536-dim embeddings
+      target_size: 300  # Resize to native EfficientNet-B3 size
+      batch_size: 16
+      normalize: true
+      pretrained: true
+
+y_sys:
+  steps: []
+
+train_sys:
+  steps:
+    - _target_: src.modules.training.mlp_trainer.MLPTrainer
+      model_name: "EfficientNetB3_MLP"
+      n_folds: 0  # 0 for train full
+      epochs: 100
+      patience: 50
+      batch_size: 64
+      use_mixed_precision: false
+      to_predict: "validation"
+
+      model:
+        _target_: src.modules.training.models.resmlp_head.ResMLPHead
+        input_dim: 1536  # EfficientNet-B3 feature dim
+        num_outputs: 5
+        num_blocks: 2  # Smaller network for single model
+        hidden_dim: 1536
+        dropout: 0.1
+        compute_aggregates: true
+        activation:
+          _target_: torch.nn.Softplus
+
+      criterion:
+        _target_: src.modules.training.losses.WeightedLoss
+        base_loss:
+          _target_: torch.nn.L1Loss
+          reduction: mean
+        weights: [1.0, 1.0, 1.0, 1.0, 1.0]
+
+      optimizer:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: torch.optim.AdamW
+        lr: 1e-3
+        weight_decay: 1e-4
+
+      scheduler:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: torch.optim.lr_scheduler.CosineAnnealingLR
+        T_max: ${..epochs}
+        eta_min: 1e-6
+
+      scorer:
+        _target_: src.scoring.global_weighted_r2.GlobalWeightedR2
+        name: global_weighted_r2
+        verbose: true
+        log_old_metric: true
+        metadata_path: ${data_path}
+
+pred_sys:
+  steps: []

@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 
-from epochlib.core import ParallelTransformingSystem
+from epochlib.core.parallel_transforming_system import ParallelTransformingSystem
 from src.modules.logging.logger import Logger
 
 

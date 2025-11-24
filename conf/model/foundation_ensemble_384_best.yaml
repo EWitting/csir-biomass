@@ -1,0 +1,59 @@
+defaults:
+  - pipeline/default@_here_
+  - _self_
+
+x_sys:
+  steps:
+    - _target_: src.modules.transformation.image_loader.ImageLoader
+      size: 384  # Medium-high resolution for balanced performance
+      preserve_aspect_ratio: true  # Keep 2:1 aspect ratio for biomass images
+    - _target_: src.modules.transformation.parallel_feature_concat.ParallelFeatureConcat
+      steps:
+        - _target_: src.modules.transformation.frozen_dinov3.FrozenDinoV3
+          model_name: "facebook/dinov3-vitb16-pretrain-lvd1689m"  # Base: 768 dim
+          batch_size: 12
+          normalize: true
+        - _target_: src.modules.transformation.frozen_timm.FrozenTimm
+          model_name: "eva02_large_patch14_clip_336.merged2b"  # Large: 1024 dim @ 336px
+          target_size: 336  # Resize from 384 to 336
+          batch_size: 12
+          normalize: true
+        - _target_: src.modules.transformation.frozen_timm.FrozenTimm
+          model_name: "vit_base_patch16_siglip_384"  # Base: 768 dim @ native 384px
+          batch_size: 12
+          normalize: true
+      # Total: 768 + 768 + 768 = 2304-dim combined embeddings
+      # All Base models for good balance of quality and speed
+
+y_sys:
+  steps: []
+
+train_sys:
+  steps:
+    - _target_: src.modules.training.tabular_trainer.TabularTrainer
+      model_name: "AutoGluon_Ensemble_384_Best"
+      to_predict: "validation"
+      use_groups: true
+      convert_to_dataframe: true
+      compute_aggregates: true
+      model:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: autogluon.tabular.TabularPredictor
+        label: "target"
+        eval_metric: "r2"
+        verbosity: 2
+        groups: "group_id"
+        problem_type: "regression"
+      fit_kwargs:
+        time_limit: 3600  # 1 hour
+        presets: "best_quality"
+        num_bag_folds: 5
+        num_bag_sets: 1
+        num_stack_levels: 0
+      predict_kwargs:
+        as_pandas: false
+
+pred_sys:
+  steps: []

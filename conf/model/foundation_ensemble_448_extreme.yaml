@@ -1,0 +1,57 @@
+defaults:
+  - pipeline/default@_here_
+  - _self_
+
+x_sys:
+  steps:
+    - _target_: src.modules.transformation.image_loader.ImageLoader
+      size: 448  # High resolution for maximum performance
+      preserve_aspect_ratio: true  # Keep 2:1 aspect ratio for biomass images
+    - _target_: src.modules.transformation.parallel_feature_concat.ParallelFeatureConcat
+      steps:
+        - _target_: src.modules.transformation.frozen_dinov3.FrozenDinoV3
+          model_name: "facebook/dinov3-vitl16-pretrain-lvd1689m"  # Large: 1024 dim
+          batch_size: 4  # Small batch for 448px @ Large model
+          normalize: true
+        - _target_: src.modules.transformation.frozen_timm.FrozenTimm
+          model_name: "eva02_large_patch14_448.mim_in22k_ft_in22k_in1k"  # Large: 1024 dim @ native 448px
+          batch_size: 4
+          normalize: true
+        - _target_: src.modules.transformation.frozen_timm.FrozenTimm
+          model_name: "vit_large_patch16_siglip_512.v2_webli"  # Large: 1024 dim @ 512px
+          target_size: 512  # Resize from 448 to 512
+          batch_size: 8
+          normalize: true
+      # Total: 1024 + 1024 + 1024 = 3072-dim combined embeddings
+      # All Large models for maximum representational power
+
+y_sys:
+  steps: []
+
+train_sys:
+  steps:
+    - _target_: src.modules.training.tabular_trainer.TabularTrainer
+      model_name: "AutoGluon_Ensemble_448_Extreme"
+      to_predict: "validation"
+      use_groups: true
+      convert_to_dataframe: true
+      compute_aggregates: true
+      model:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: autogluon.tabular.TabularPredictor
+        label: "target"
+        eval_metric: "r2"
+        verbosity: 2
+        groups: "group_id"
+        problem_type: "regression"
+      fit_kwargs:
+        time_limit: 7200  # 2 hours for extreme quality
+        presets: "extreme_quality"
+        auto_stack: true  # Enable automatic stacking
+      predict_kwargs:
+        as_pandas: false
+
+pred_sys:
+  steps: []

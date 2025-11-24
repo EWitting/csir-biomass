@@ -1,0 +1,87 @@
+defaults:
+  - pipeline/default@_here_
+  - _self_
+
+x_sys:
+  steps:
+    - _target_: src.modules.transformation.image_loader.ImageLoader
+      size: 448  # High resolution for maximum performance
+      preserve_aspect_ratio: true  # Keep 2:1 aspect ratio for biomass images
+    - _target_: src.modules.transformation.parallel_feature_concat.ParallelFeatureConcat
+      steps:
+        - _target_: src.modules.transformation.frozen_dinov3.FrozenDinoV3
+          model_name: "facebook/dinov3-vitl16-pretrain-lvd1689m"  # Large: 1024 dim
+          batch_size: 4  # Small batch for 448px @ Large model
+          normalize: true
+        - _target_: src.modules.transformation.frozen_timm.FrozenTimm
+          model_name: "eva02_large_patch14_448.mim_in22k_ft_in22k_in1k"  # Large: 1024 dim @ native 448px
+          batch_size: 4
+          normalize: true
+        - _target_: src.modules.transformation.frozen_timm.FrozenTimm
+          model_name: "vit_large_patch16_siglip_512.v2_webli"  # Large: 1024 dim @ 512px
+          target_size: 512  # Resize from 448 to 512
+          batch_size: 8
+          normalize: true
+      # Total: 1024 + 1024 + 1024 = 3072-dim combined embeddings
+      # All Large models for maximum representational power
+
+y_sys:
+  steps: []
+
+train_sys:
+  steps:
+    - _target_: src.modules.training.mlp_trainer.MLPTrainer
+      model_name: "FoundationMLP"
+      n_folds: 0  # 0 for train full
+      epochs: 100
+      patience: 50
+      batch_size: 64  # Larger batch for MLP (no images, just embeddings)
+      use_mixed_precision: false  # Not needed for small MLP
+      to_predict: "validation"
+
+      model:
+        _target_: src.modules.training.models.resmlp_head.ResMLPHead
+        input_dim: 3072  # 3x 1024-dim embeddings
+        num_outputs: 5
+        num_blocks: 3  # 3 blocks of ResMLPBlocks
+        hidden_dim: 3072  # Same as input_dim
+        dropout: 0.1
+        compute_aggregates: true  # Compute GDM and Total from base components
+        activation:
+          _target_: torch.nn.Softplus
+
+      criterion:
+        _target_: src.modules.training.losses.WeightedLoss
+        base_loss:
+          _target_: torch.nn.L1Loss
+          reduction: mean
+        weights: [1.0, 1.0, 1.0, 1.0, 1.0]  # [Dry_Clover_g, Dry_Dead_g, Dry_Green_g, GDM_g, Dry_Total_g]
+        # scale_by_variance: true  # Scale by 1/std^2 to align with R^2 optimization
+        # variance_momentum: 0.1  # EWMA momentum
+
+      optimizer:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: torch.optim.AdamW
+        lr: 1e-3
+        weight_decay: 1e-4
+
+      scheduler:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: torch.optim.lr_scheduler.CosineAnnealingLR
+        T_max: ${..epochs}
+        eta_min: 1e-6
+
+      # Global Weighted R^2 Scorer
+      scorer:
+        _target_: src.scoring.global_weighted_r2.GlobalWeightedR2
+        name: global_weighted_r2
+        verbose: true
+        log_old_metric: true
+        metadata_path: ${data_path}
+
+pred_sys:
+  steps: []
