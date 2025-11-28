@@ -1,0 +1,47 @@
+defaults:
+  - pipeline/default@_here_
+  - _self_
+
+x_sys:
+  steps:
+    - _target_: src.modules.transformation.image_loader.ImageLoader
+      size: 448  # High resolution for DINOv3
+      preserve_aspect_ratio: true  # Keep 2:1 aspect ratio for biomass images
+    - _target_: src.modules.transformation.frozen_dinov3.FrozenDinoV3
+      model_name: "facebook/dinov3-vitl16-pretrain-lvd1689m"  # Large: 1024 dim
+      batch_size: 4  # Small batch for 448px @ Large model
+      normalize: true
+      # Output: 1024-dim DINOv3 embeddings
+
+y_sys:
+  steps: []
+
+train_sys:
+  steps:
+    - _target_: src.modules.training.tabular_trainer.TabularTrainer
+      model_name: "AutoGluon_DINOv3_448"
+      to_predict: "validation"
+      use_groups: true
+      convert_to_dataframe: true
+      compute_aggregates: true
+      model:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: autogluon.tabular.TabularPredictor
+        label: "target"
+        eval_metric: "r2"
+        verbosity: 2
+        groups: "group_id"
+        problem_type: "regression"
+      fit_kwargs:
+        time_limit: 1200  # 20 minutes
+        presets: "best_quality"  # Extreme quality AutoGluon
+        num_bag_folds: 5
+        num_bag_sets: 1
+        num_stack_levels: 0
+      predict_kwargs:
+        as_pandas: false
+
+pred_sys:
+  steps: []

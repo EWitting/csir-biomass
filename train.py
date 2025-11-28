@@ -3,6 +3,7 @@ import os
 import warnings
 from contextlib import nullcontext
 from pathlib import Path
+import numpy as np
 
 import hydra
 import wandb

@@ -1,0 +1,137 @@
+defaults:
+  - pipeline/default@_here_
+  - _self_
+
+x_sys:
+  steps:
+    - _target_: src.modules.transformation.image_loader.ImageLoader
+      size: 448  # High resolution for DINOv3
+      preserve_aspect_ratio: true  # Keep 2:1 aspect ratio for biomass images
+
+y_sys:
+  steps: []
+
+train_sys:
+  steps:
+    - _target_: src.modules.training.mlae_trainer.MLAETrainer
+      model_name: "BiomassDINOv3_Frozen"
+      n_folds: 0  # 0 for train full
+      epochs: 100
+      patience: 25
+      batch_size: 5
+      gradient_accumulation_steps: 3  # Effective batch size = 15
+      use_mixed_precision: true
+      nominal_batch_size: 16
+      max_grad_norm: 1.0  # Gradient clipping for stability
+      checkpointing_enabled: false
+
+      # TTA settings
+      tta_hflip: true
+      tta_vflip: true
+      tta_rotate: true
+      tta_sliding_window: 10
+
+      # MLAE-specific: apply fixed mask after initialization
+      apply_fixed_mask: false  # Not used since backbone is frozen
+
+      # Keep backbone frozen for all epochs (train head only)
+      freeze_backbone_epochs: 100  # Frozen throughout training
+
+      # ImageNet normalization (DINOv3 expects this)
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+
+      model:
+        _target_: src.modules.training.models.dinov3_mlae_model.DINOv3_MLAE_Model
+        model_name: "facebook/dinov3-vitl16-pretrain-lvd1689m"  # Large: 1024 dim
+
+        # LoRA Expert Configuration (not trained since backbone frozen)
+        rank: 8
+        lora_alpha: 16.0
+        lora_dropout: 0.0
+        drop_rate: 0.0  # No dropout needed since not training
+
+        # Regression Head (only trainable part)
+        num_outputs: 5
+        head_dropout: 0.2
+        compute_aggregates: true  # Compute GDM and Total from base components
+        activation:
+          _target_: torch.nn.ReLU
+
+        # Backbone Settings
+        freeze_backbone: true  # Keep DINOv3 frozen
+
+        # Where to apply MLAE (not used since frozen, but required for model init)
+        apply_to_qkv: true
+        apply_to_proj: false
+        apply_to_mlp: false
+
+        # Masking Strategy (not used since frozen)
+        masking_strategy: "random"
+        masking_type: "stochastic"
+
+      criterion:
+        _target_: src.modules.training.losses.WeightedLoss
+        base_loss:
+          _target_: src.modules.training.losses.StableLogCoshLoss
+        weights: [1.0, 1.0, 1.0, 0.0, 0.0]  # Only base components
+        scale_by_variance: true
+        variance_momentum: 0.1
+
+      optimizer:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: torch.optim.AdamW
+        lr: 1e-3  # Can use higher LR since only training head
+        weight_decay: 1e-4
+        betas: [0.9, 0.999]
+
+      scheduler:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: timm.scheduler.cosine_lr.CosineLRScheduler
+        t_initial: ${..epochs}
+        lr_min: 1e-6
+        warmup_lr_init: 1e-6
+        warmup_t: 5  # 5-epoch warmup
+
+      # Augmentations for training - random crop to square 448x448
+      # This gives augmentation benefits without pre-extracting features
+      augmentations:
+        _target_: src.modules.training.augmentation.Augmentation
+        kornia:
+          _target_: kornia.augmentation.AugmentationSequential
+          _args_:
+            - _target_: kornia.augmentation.RandomCrop
+              size: [448, 448]
+            - _target_: kornia.augmentation.RandomHorizontalFlip
+              p: 0.5
+            - _target_: kornia.augmentation.RandomVerticalFlip
+              p: 0.5
+            - _target_: kornia.augmentation.auto.TrivialAugment
+          data_keys:
+            - input
+
+      # Validation augmentations - random crop to square 448x448
+      val_augmentations:
+        _target_: src.modules.training.augmentation.Augmentation
+        kornia:
+          _target_: kornia.augmentation.AugmentationSequential
+          _args_:
+            - _target_: kornia.augmentation.RandomCrop
+              size: [448, 448]
+          data_keys:
+            - input
+
+      # Global Weighted R² Scorer
+      scorer:
+        _target_: src.scoring.global_weighted_r2.GlobalWeightedR2
+        name: global_weighted_r2
+        verbose: true
+        log_old_metric: true
+        metadata_path: ${data_path}
+
+pred_sys:
+  steps: []

@@ -30,33 +30,37 @@ y_sys:
 
 train_sys:
   steps:
-    - _target_: src.modules.training.mlp_trainer.MLPTrainer
-      model_name: "FoundationMLP"
+    - _target_: src.modules.training.realmlp_trainer.RealMLPTrainer
+      model_name: "FoundationRealMLP"
       n_folds: 0  # 0 for train full
-      epochs: 100
-      patience: 50
-      batch_size: 64  # Larger batch for MLP (no images, just embeddings)
+      epochs: 50  # RealMLP-TD paper: 256 epochs with multi-cycle LR
+      patience: 256
+      batch_size: 64  # Paper recommendation: 256
       use_mixed_precision: false  # Not needed for small MLP
       to_predict: "validation"
       max_grad_norm: 1.0  # Gradient norm clipping (1.0 is a common default)
+      dataloader_args:
+        persistent_workers: true
+        num_workers: 4
 
       model:
-        _target_: src.modules.training.models.resmlp_head.ResMLPHead
+        _target_: src.modules.training.models.realmlp_head.RealMLPHead
         input_dim: 3072  # 3x 1024-dim embeddings
         num_outputs: 5
-        num_blocks: 1  # 3 blocks of ResMLPBlocks
-        hidden_dim: 3072  # Same as input_dim
+        hidden_dim: 256  # Paper recommendation: 256 neurons per layer
         dropout: 0.1
         compute_aggregates: true  # Compute GDM and Total from base components
         activation:
           _target_: torch.nn.ReLU
+        use_output_clipping: true  # Enable output clipping at test time
+        max_output_margin: 0.5  # 50% margin on positive end
 
       criterion:
         _target_: src.modules.training.losses.WeightedLoss
         base_loss:
           _target_: src.modules.training.losses.StableLogCoshLoss
-        weights: [1.0, 1.0, 1.0, 1.0, 1.0]  # [Dry_Clover_g, Dry_Dead_g, Dry_Green_g, GDM_g, Dry_Total_g]
-        scale_by_variance: true  # Scale by 1/std *before* computing loss (makes MSE equivalent to R^2 optimization)
+        weights: [1.0, 1.0, 1.0, 0.0, 0.0]  # Only base components [clover, dead, green, 0, 0]
+        scale_by_variance: true  # Scale by 1/std before computing loss
         variance_momentum: 0.1  # EWMA momentum
 
       optimizer:
@@ -64,8 +68,9 @@ train_sys:
         _args_:
           - _target_: hydra.utils.get_class
             path: torch.optim.AdamW
-        lr: 5e-4
-        weight_decay: 1e-4
+        lr: 0.005 # Will be overridden by parameter groups (TODO)yes
+        weight_decay: 0.02  # Paper: base weight decay 0.02 (will be scheduled)
+        betas: [0.9, 0.95]  # Paper: β1 = 0.9, β2 = 0.95 (instead of default 0.999)
 
       scheduler:
         _target_: functools.partial

@@ -51,12 +51,12 @@ def setup_train_args(
         "MainTrainer": main_trainer,
     }
 
-    # Also add train args to TabularTrainer and MLPTrainer if they exist
+    # Also add train args to TabularTrainer, MLPTrainer, and FineTuneTrainer if they exist
     if hasattr(pipeline, 'train_sys') and hasattr(pipeline.train_sys, 'get_steps'):
         for step in pipeline.train_sys.get_steps():
             step_name = step.__class__.__name__
-            if step_name in ["TabularTrainer", "MLPTrainer"]:
-                # TabularTrainer and MLPTrainer need the same args as MainTrainer
+            if step_name in ["TabularTrainer", "MLPTrainer", "FineTuneTrainer", "RealMLPTrainer", "MLAETrainer"]:
+                # These trainers need the same args as MainTrainer
                 trainer_args = {
                     "train_indices": train_indices,
                     "validation_indices": test_indices,

@@ -1,4 +1,8 @@
-"""Module for biomass training block."""
+"""MLAE (Masked LoRA Experts) Trainer for biomass regression.
+
+This trainer implements fine-tuning with Masked LoRA Experts on vision transformers.
+Based on MainTrainer but adapted for MLAE-specific features like expert masking.
+"""
 
 import contextlib
 import copy
@@ -25,8 +29,14 @@ from src.scoring.scorer import Scorer
 
 
 @dataclass
-class MainTrainer(TorchTrainer, Logger):
-    """Main training block for biomass regression."""
+class MLAETrainer(TorchTrainer, Logger):
+    """MLAE training block for biomass regression with vision transformers.
+
+    Extends TorchTrainer with MLAE-specific features:
+    - Fixed mask application for permanent expert masking
+    - Expert-level dropout during training
+    - Support for various masking strategies
+    """
 
     augmentations: Optional[Augmentation] = None
     val_augmentations: Optional[Augmentation] = None
@@ -36,35 +46,101 @@ class MainTrainer(TorchTrainer, Logger):
     tta_rotate: bool = field(default=False, init=True, repr=False, compare=False)
     tta_sliding_window: int = field(
         default=1, init=True, repr=False, compare=False
-    )  # Number of horizontal sliding window slices for inference
+    )
     nominal_batch_size: int = field(default=16, init=True, repr=False, compare=False)
-    scorer: Optional[Scorer] = None  # For exact validation metric computation
-    mean: tuple[float, float, float] = (0.485, 0.456, 0.406)  # Normalization mean
-    std: tuple[float, float, float] = (0.229, 0.224, 0.225)  # Normalization std
-
-    # EMA (Exponential Moving Average) parameters
-    use_ema: bool = field(
-        default=False, init=True, repr=True, compare=False
-    )  # Enable EMA smoothing
-    ema_decay: float = field(
-        default=0.99, init=True, repr=True, compare=False
-    )  # EMA decay rate (0.99 = smooth over ~100 steps)
-
-    # Embedding extraction mode (for using model as feature extractor)
-    return_embeddings: bool = field(
-        default=False, init=True, repr=False, compare=False
-    )  # Return embeddings instead of predictions
+    scorer: Optional[Scorer] = None
+    mean: tuple[float, float, float] = (0.485, 0.456, 0.406)
+    std: tuple[float, float, float] = (0.229, 0.224, 0.225)
 
     # Gradient clipping
     max_grad_norm: Optional[float] = field(
         default=None, init=True, repr=True, compare=False
-    )  # Max gradient norm for clipping (None = disabled)
+    )
+
+    # MLAE-specific: apply fixed mask after initialization
+    apply_fixed_mask: bool = field(
+        default=False, init=True, repr=True, compare=False
+    )
+
+    # Gradual unfreezing: train only head for first N epochs, then unfreeze backbone
+    freeze_backbone_epochs: int = field(
+        default=0, init=True, repr=True, compare=False
+    )  # Number of epochs to keep backbone frozen (0 = train from start)
+
+    # Embedding extraction mode
+    return_embeddings: bool = field(
+        default=False, init=True, repr=False, compare=False
+    )
 
     # For storing validation indices to pass to scorer
     _current_validation_indices: Optional[list[int]] = field(
         default=None, init=False, repr=False, compare=False
     )
     _current_epoch: int = field(default=0, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Post-initialization to ensure parent class initialization."""
+        super().__post_init__()
+        # Initialize early stopping counter (TorchTrainer expects this)
+        if not hasattr(self, 'early_stopping_counter'):
+            self.early_stopping_counter = 0
+
+    def _post_model_init(self) -> None:
+        """Hook called after model initialization.
+
+        Apply fixed mask if using fixed or mixed masking strategy.
+        """
+        super()._post_model_init()
+
+        # Apply fixed mask if the model supports it
+        if self.apply_fixed_mask and hasattr(self.model, 'apply_fixed_mask'):
+            self.log_to_terminal("Applying fixed expert mask to MLAE layers")
+            if isinstance(self.model, nn.DataParallel):
+                self.model.module.apply_fixed_mask()
+            else:
+                self.model.apply_fixed_mask()
+
+        # Freeze backbone for gradual unfreezing if requested
+        if self.freeze_backbone_epochs > 0:
+            self._freeze_backbone()
+            self.log_to_terminal(
+                f"Backbone frozen for first {self.freeze_backbone_epochs} epochs (training head only)"
+            )
+
+        # Print trainable parameters for debugging
+        if hasattr(self.model, 'print_trainable_parameters'):
+            if isinstance(self.model, nn.DataParallel):
+                self.model.module.print_trainable_parameters()
+            else:
+                self.model.print_trainable_parameters()
+
+    def _freeze_backbone(self) -> None:
+        """Freeze backbone (LoRA) parameters, keeping only head trainable."""
+        model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+
+        if hasattr(model, 'backbone'):
+            for param in model.backbone.parameters():
+                param.requires_grad = False
+            self.log_to_terminal("Frozen backbone parameters (LoRA experts)")
+
+    def _unfreeze_backbone(self) -> None:
+        """Unfreeze backbone (LoRA) parameters for full training."""
+        model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+
+        if hasattr(model, 'get_lora_parameters'):
+            # Only unfreeze LoRA parameters, not the entire backbone
+            for param in model.get_lora_parameters():
+                param.requires_grad = True
+            self.log_to_terminal(
+                f"Unfrozen backbone at epoch {self._current_epoch} - now training LoRA experts + head"
+            )
+        elif hasattr(model, 'backbone'):
+            # Fallback: unfreeze all backbone params
+            for param in model.backbone.parameters():
+                param.requires_grad = True
+            self.log_to_terminal(
+                f"Unfrozen entire backbone at epoch {self._current_epoch}"
+            )
 
     def create_datasets(
         self,
@@ -134,8 +210,6 @@ class MainTrainer(TorchTrainer, Logger):
     ) -> Dataset[tuple[Tensor, ...]]:
         """Create the prediction dataset.
 
-        Images are in [0, 1] range and need normalization via val_augmentations.
-
         :param x: The input data (images in [0, 1] range)
         :return: The prediction dataset
         """
@@ -144,8 +218,6 @@ class MainTrainer(TorchTrainer, Logger):
         else:
             x_tensor = torch.tensor(x, dtype=self.x_tensor_type)
 
-        # Use AugmentedDataset without augmentations (only normalization)
-        # Create dummy targets for the dataset (not used during inference)
         dummy_y = torch.zeros((len(x_tensor), 1), dtype=torch.float32)
 
         return AugmentedDataset(
@@ -177,10 +249,8 @@ class MainTrainer(TorchTrainer, Logger):
 
         :return: The predictions (or embeddings) and the expected output.
         """
-        # Respect to_predict parameter, especially important for return_embeddings=True
         match self.to_predict:
             case "all":
-                # Return predictions/embeddings for ALL data (train + validation)
                 concat_dataset: Dataset[Any] = self._concat_datasets(
                     train_dataset,
                     validation_dataset,
@@ -198,7 +268,6 @@ class MainTrainer(TorchTrainer, Logger):
                 )
                 return self.predict_on_loader(pred_dataloader), y
             case "validation":
-                # Return predictions/embeddings for validation data only
                 validation_dataset = self.create_prediction_dataset(x[validation_indices])
                 validation_loader = DataLoader(
                     validation_dataset,
@@ -211,7 +280,6 @@ class MainTrainer(TorchTrainer, Logger):
                 )
                 return self.predict_on_loader(validation_loader), y[validation_indices]
             case "none":
-                # Return original data
                 return x, y
             case _:
                 raise ValueError("to_predict should be either 'validation', 'all' or 'none'")
@@ -221,7 +289,7 @@ class MainTrainer(TorchTrainer, Logger):
         dataloader: DataLoader[tuple[Tensor, ...]],
         epoch: int,
     ) -> float:
-        """Train the model for one epoch using gradient accumulation.
+        """Train the model for one epoch.
 
         :param dataloader: Dataloader for the training data
         :param epoch: Epoch number
@@ -234,7 +302,6 @@ class MainTrainer(TorchTrainer, Logger):
             unit="batch",
             desc=f"Epoch {epoch} Train ({self.initialized_optimizer.param_groups[0]['lr']:0.8f})",
         )
-        # Initialize gradients once at the start of the epoch
         self.initialized_optimizer.zero_grad()
         for i, batch in enumerate(pbar):
             X_batch, y_batch = batch
@@ -256,15 +323,12 @@ class MainTrainer(TorchTrainer, Logger):
             else:
                 loss.backward()
 
-            # Append the original loss for logging
             losses.append(raw_loss.item())
 
             # Perform optimizer step every 'accumulation_steps' batches
             if (i + 1) % self.gradient_accumulation_steps == 0:
-                # Apply gradient clipping if enabled
                 if self.max_grad_norm is not None:
                     if self.use_mixed_precision:
-                        # Unscale gradients before clipping
                         self.scaler.unscale_(self.initialized_optimizer)
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), self.max_grad_norm
@@ -280,10 +344,8 @@ class MainTrainer(TorchTrainer, Logger):
 
         # Final step if remaining gradients didn't trigger an update
         if (i + 1) % self.gradient_accumulation_steps != 0:
-            # Apply gradient clipping if enabled
             if self.max_grad_norm is not None:
                 if self.use_mixed_precision:
-                    # Unscale gradients before clipping
                     self.scaler.unscale_(self.initialized_optimizer)
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.max_grad_norm
@@ -296,7 +358,6 @@ class MainTrainer(TorchTrainer, Logger):
                 self.initialized_optimizer.step()
             self.initialized_optimizer.zero_grad()
 
-        # Remove the CUDA cache
         torch.cuda.empty_cache()
         gc.collect()
 
@@ -311,10 +372,10 @@ class MainTrainer(TorchTrainer, Logger):
         fold: int = -1,
         start_epoch: int = 0,
     ) -> None:
-        """Override training loop to track validation indices and epoch for verbose scoring.
+        """Training loop with verbose scoring support.
 
         :param train_loader: Dataloader for the training data.
-        :param validation_loader: Dataloader for the validation data. (can be empty)
+        :param validation_loader: Dataloader for the validation data.
         :param train_losses: List of train losses.
         :param val_losses: List of validation losses.
         :param fold: Fold number.
@@ -335,14 +396,11 @@ class MainTrainer(TorchTrainer, Logger):
 
         # Define metrics for scorer if available
         if self.scorer is not None:
-            # Define the main scorer metric (new global R²)
             self.external_define_metric(
                 self.wrap_log(f"Validation/{self.scorer.name}"), self.wrap_log("epoch")
             )
 
-            # Define verbose metrics if scorer has verbose mode
             if hasattr(self.scorer, "verbose") and self.scorer.verbose:
-                # Define old method metric (for comparison with historical runs)
                 if (
                     hasattr(self.scorer, "log_old_metric")
                     and self.scorer.log_old_metric
@@ -351,7 +409,6 @@ class MainTrainer(TorchTrainer, Logger):
                         self.wrap_log("Validation/weighted_r2"), self.wrap_log("epoch")
                     )
 
-                # Define per-target metrics
                 target_names = [
                     "Dry_Clover_g",
                     "Dry_Dead_g",
@@ -365,23 +422,20 @@ class MainTrainer(TorchTrainer, Logger):
                         self.wrap_log("epoch"),
                     )
 
-                # Define per-species and per-state metrics (will be created dynamically as encountered)
-                # These get defined by wandb automatically when first logged with epoch
-
-        # Set the scheduler to the correct epoch
         if self.initialized_scheduler is not None:
             self.initialized_scheduler.step(epoch=start_epoch)
 
         for epoch in range(start_epoch, self.epochs):
-            # Store current epoch for scorer access
             self._current_epoch = epoch
 
-            # Train using train_loader
+            # Gradual unfreezing: unfreeze backbone after freeze_backbone_epochs
+            if epoch == self.freeze_backbone_epochs and self.freeze_backbone_epochs > 0:
+                self._unfreeze_backbone()
+
             train_loss = self.train_one_epoch(train_loader, epoch)
             self.log_to_debug(f"Epoch {epoch} Train Loss: {train_loss}")
             train_losses.append(train_loss)
 
-            # Log train loss
             self.log_to_external(
                 message={
                     self.wrap_log(f"Training/Train Loss{fold_no}"): train_losses[-1],
@@ -389,20 +443,17 @@ class MainTrainer(TorchTrainer, Logger):
                 },
             )
 
-            # Step the scheduler
             if self.initialized_scheduler is not None:
                 self.initialized_scheduler.step(epoch=epoch + 1)
 
             # Checkpointing
             if self.checkpointing_enabled:
-                # Save checkpoint
                 self._save_model(
                     self.get_model_checkpoint_path(epoch),
                     save_to_external=False,
                     quiet=True,
                 )
 
-                # Remove old checkpoints
                 if (
                     self.checkpointing_keep_every == 0
                     or epoch % self.checkpointing_keep_every != 0
@@ -418,7 +469,6 @@ class MainTrainer(TorchTrainer, Logger):
                 self.log_to_debug(f"Epoch {epoch} Valid Loss: {self.last_val_loss}")
                 val_losses.append(self.last_val_loss)
 
-                # Log validation loss and plot train/val loss against each other
                 self.log_to_external(
                     message={
                         self.wrap_log(
@@ -433,9 +483,7 @@ class MainTrainer(TorchTrainer, Logger):
                         "type": "wandb_plot",
                         "plot_type": "line_series",
                         "data": {
-                            "xs": list(
-                                range(epoch + 1),
-                            ),  # Ensure it's a list, not a range object
+                            "xs": list(range(epoch + 1)),
                             "ys": [train_losses, val_losses],
                             "keys": [f"Train{fold_no}", f"Validation{fold_no}"],
                             "title": self.wrap_log(f"Training/Loss{fold_no}"),
@@ -454,7 +502,6 @@ class MainTrainer(TorchTrainer, Logger):
                     )
                     break
 
-            # Log the trained epochs to wandb if we finished training
             self.log_to_external(message={self.wrap_log(f"Epochs{fold_no}"): epoch + 1})
 
     def train(
@@ -465,7 +512,7 @@ class MainTrainer(TorchTrainer, Logger):
         validation_indices: list[int] | npt.NDArray[np.int32],
         **kwargs: Any,
     ) -> tuple[npt.NDArray[np.float32] | None, npt.NDArray[np.float32] | None]:
-        """Override train to store validation indices for scorer access.
+        """Train with validation indices tracking for scorer.
 
         :param x: The input to the system.
         :param y: The expected output of the system.
@@ -474,14 +521,12 @@ class MainTrainer(TorchTrainer, Logger):
         :param kwargs: Additional arguments.
         :return: The predictions and the expected output.
         """
-        # Store validation indices for scorer access
         self._current_validation_indices = (
             list(validation_indices)
             if not isinstance(validation_indices, list)
             else validation_indices
         )
 
-        # Call parent train method - pass indices through kwargs, not as positional args
         return super().train(
             x,
             y,
@@ -496,9 +541,6 @@ class MainTrainer(TorchTrainer, Logger):
         desc: str,
     ) -> float:
         """Compute validation loss and exact metric for one epoch.
-
-        Accumulates all predictions and labels to compute exact competition metric.
-        Uses EMA weights if enabled.
 
         :param dataloader: Dataloader for the validation data.
         :param desc: Description for the tqdm progress bar.
@@ -519,16 +561,13 @@ class MainTrainer(TorchTrainer, Logger):
                 X_batch = batch_to_device(X_batch, self.x_tensor_type, self.device)
                 y_batch = batch_to_device(y_batch, self.y_tensor_type, self.device)
 
-                # Forward pass
                 y_pred = self.model(X_batch)
                 loss = self.criterion(y_pred, y_batch)
 
-                # Accumulate for metric computation
                 losses.append(loss.item())
                 all_preds.append(y_pred.cpu())
                 all_labels.append(y_batch.cpu())
 
-                # Update progress bar with average loss
                 avg_loss = sum(losses) / len(losses)
                 pbar.set_description(desc=desc)
                 pbar.set_postfix(loss=avg_loss)
@@ -540,7 +579,6 @@ class MainTrainer(TorchTrainer, Logger):
             all_preds = torch.cat(all_preds, dim=0).numpy()
             all_labels = torch.cat(all_labels, dim=0).numpy()
 
-            # Pass epoch, indices, and logger to scorer for verbose logging
             metric_score = self.scorer(
                 all_labels,
                 all_preds,
@@ -553,7 +591,6 @@ class MainTrainer(TorchTrainer, Logger):
                 logger=self,
             )
 
-            # Log main metric to wandb with epoch
             self.log_to_external(
                 message={
                     self.wrap_log(f"Validation/{self.scorer.name}"): metric_score,
@@ -561,7 +598,6 @@ class MainTrainer(TorchTrainer, Logger):
                 }
             )
 
-        # Always return the loss for early stopping and tracking
         return avg_loss
 
     def predict_on_loader(
@@ -584,7 +620,6 @@ class MainTrainer(TorchTrainer, Logger):
         self.model.eval()
         predictions = []
 
-        # Create a new dataloader from the dataset of the input dataloader with collate_fn
         loader = DataLoader(
             loader.dataset,
             batch_size=loader.batch_size,
@@ -605,10 +640,8 @@ class MainTrainer(TorchTrainer, Logger):
                     or self.tta_vflip
                     or self.tta_rotate
                 ):
-                    # Test-time augmentation for regression
                     all_preds = []
 
-                    # Sliding window is the outer loop - for each window, apply TTA
                     windows = (
                         self._get_sliding_windows(X_batch)
                         if self.tta_sliding_window > 1
@@ -616,11 +649,8 @@ class MainTrainer(TorchTrainer, Logger):
                     )
 
                     for window, _ in windows:
-                        # Generate combinations based on enabled TTA options
                         hflip_options = [False, True] if self.tta_hflip else [False]
                         vflip_options = [False, True] if self.tta_vflip else [False]
-                        # Optimization: if both hflip and vflip are enabled, only need [0, 1] rotations
-                        # because 180° = hflip+vflip and 270° = 90°+hflip+vflip
                         if self.tta_rotate:
                             rot_options = (
                                 [0, 1]
@@ -635,21 +665,19 @@ class MainTrainer(TorchTrainer, Logger):
                                 for rot in rot_options:
                                     window_transformed = window.clone()
 
-                                    # Apply transformations to this window
                                     if hflip:
                                         window_transformed = torch.flip(
                                             window_transformed, dims=[3]
-                                        )  # Flip width (horizontal)
+                                        )
                                     if vflip:
                                         window_transformed = torch.flip(
                                             window_transformed, dims=[2]
-                                        )  # Flip height (vertical)
+                                        )
                                     if rot != 0:
                                         window_transformed = torch.rot90(
                                             window_transformed, k=rot, dims=[2, 3]
                                         )
 
-                                    # Predict on transformed window (or extract embeddings)
                                     if self.return_embeddings:
                                         if hasattr(self.model, "get_embeddings"):
                                             y_pred = self.model.get_embeddings(
@@ -669,11 +697,9 @@ class MainTrainer(TorchTrainer, Logger):
                                         y_pred = self.model(window_transformed)
                                     all_preds.append(y_pred)
 
-                    # Average all predictions (across all windows and TTA variants)
                     pred = torch.mean(torch.stack(all_preds), dim=0)
                     predictions.extend(pred.cpu().numpy())
                 else:
-                    # No TTA - just predict normally (or extract embeddings)
                     if self.return_embeddings:
                         if hasattr(self.model, "get_embeddings"):
                             y_pred = self.model.get_embeddings(X_batch).cpu().numpy()
@@ -696,23 +722,16 @@ class MainTrainer(TorchTrainer, Logger):
     def _get_sliding_windows(self, X_batch: Tensor) -> list[tuple[Tensor, slice]]:
         """Extract sliding windows from horizontally wide images.
 
-        Assumes images are wider than they are tall (2:1 aspect ratio or similar).
-        Splits the image into multiple overlapping windows.
-
         :param X_batch: Input batch (B, C, H, W)
         :return: List of (window_tensor, slice) tuples
         """
         B, C, H, W = X_batch.shape
 
-        # If image is square or portrait, return the full image
         if W <= H:
             return [(X_batch, slice(None))]
 
-        # Calculate window size (square)
         window_size = H
 
-        # Calculate stride for overlapping windows
-        # Distribute windows evenly across the width with overlap
         stride = (
             (W - window_size) // (self.tta_sliding_window - 1)
             if self.tta_sliding_window > 1
@@ -721,11 +740,9 @@ class MainTrainer(TorchTrainer, Logger):
 
         windows = []
         for i in range(self.tta_sliding_window):
-            # Calculate window start position
             start_w = min(i * stride, W - window_size)
             end_w = start_w + window_size
 
-            # Extract window
             window = X_batch[:, :, :, start_w:end_w]
             windows.append((window, slice(start_w, end_w)))
 
@@ -744,72 +761,22 @@ class MainTrainer(TorchTrainer, Logger):
         """Load the model from the model_directory folder."""
         model_path = path if path is not None else self.get_model_path()
 
-        # Check if the model exists
         if not model_path.exists():
             raise FileNotFoundError(
                 f"Model not found in {model_path}",
             )
 
-        # Load model
         self.log_to_terminal(
             f"Loading model from {model_path}",
         )
         checkpoint = torch.load(model_path, weights_only=False)
 
-        # Load the weights from the checkpoint
         if isinstance(checkpoint, nn.DataParallel):
             model = checkpoint.module
         else:
             model = checkpoint
 
-        # Set the current model to the loaded model
         if isinstance(self.model, nn.DataParallel):
             self.model.module.load_state_dict(model.state_dict())
         else:
             self.model.load_state_dict(model.state_dict())
-
-    def _extract_embeddings(
-        self,
-        loader: DataLoader[tuple[Tensor, ...]],
-    ) -> npt.NDArray[np.float32]:
-        """Extract feature embeddings from the model instead of predictions.
-
-        Used when return_embeddings=True. This allows the model to be used as a
-        feature extractor for downstream tabular models.
-
-        :param loader: The loader to extract embeddings from
-        :return: Feature embeddings (N, embedding_dim)
-        """
-        self.log_to_terminal("Extracting embeddings from model")
-        self.model.eval()
-        all_embeddings = []
-
-        with (
-            torch.no_grad(),
-            tqdm(loader, unit="batch", desc="Extracting embeddings") as tepoch,
-        ):
-            for data in tepoch:
-                X_batch = batch_to_device(data[0], self.x_tensor_type, self.device)
-
-                # Extract embeddings using the model's get_embeddings method
-                if hasattr(self.model, "get_embeddings"):
-                    embeddings = self.model.get_embeddings(X_batch)
-                elif hasattr(self.model, "module") and hasattr(
-                    self.model.module, "get_embeddings"
-                ):
-                    # Handle DataParallel wrapper
-                    embeddings = self.model.module.get_embeddings(X_batch)
-                else:
-                    raise AttributeError(
-                        f"Model {self.model.__class__.__name__} does not have a get_embeddings method. "
-                        "Please implement it to support embedding extraction mode."
-                    )
-
-                all_embeddings.append(embeddings.cpu().numpy())
-
-        # Concatenate all batches
-        embeddings = np.concatenate(all_embeddings, axis=0)
-
-        self.log_to_terminal(f"Extracted embeddings with shape {embeddings.shape}")
-
-        return embeddings

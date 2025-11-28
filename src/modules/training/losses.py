@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
-
+import torch.nn.functional as F
 
 def _get_base_loss_repr(base_loss: nn.Module) -> str:
     """Get string representation of base loss with its parameters.
@@ -91,12 +91,17 @@ class WeightedLoss(nn.Module):
     
     def _update_stats(self, y_true: torch.Tensor) -> None:
         """Update running statistics using EWMA.
-        
+
         Accumulates mean and variance across batches using exponential moving average.
         This provides more robust estimates than a single batch.
-        
+
         :param y_true: Ground truth (B, num_targets)
         """
+        # Skip single-sample batches to avoid NaN from unbiased variance
+        # (unbiased variance divides by N-1, which is 0 when N=1)
+        if y_true.shape[0] <= 1:
+            return
+
         # Compute batch statistics
         batch_mean = torch.mean(y_true, dim=0)
         batch_var = torch.var(y_true, dim=0, unbiased=True)
@@ -281,11 +286,15 @@ class GlobalWeightedLoss(nn.Module):
     
     def _update_global_stats(self, y_true: torch.Tensor) -> None:
         """Update global running statistics using EWMA.
-        
+
         Computes global weighted mean and variance across all (sample, target) pairs.
-        
+
         :param y_true: Ground truth (B, num_targets)
         """
+        # Skip single-sample batches to avoid potential numerical issues
+        if y_true.shape[0] <= 1:
+            return
+
         batch_size, num_targets = y_true.shape
         
         # Flatten targets
@@ -378,3 +387,13 @@ class GlobalWeightedLoss(nn.Module):
             f")"
         )
 
+class StableLogCoshLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, y_pred, y_true):
+        diff = y_pred - y_true
+        # Naive log(cosh(x)) overflows for large x.
+        # Stable formula: x + softplus(-2x) - log(2)
+        # This works because log(cosh(x)) ~= abs(x) - log(2) for large x
+        return torch.mean(diff + F.softplus(-2. * diff) - torch.log(torch.tensor(2.0)))

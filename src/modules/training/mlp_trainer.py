@@ -1,11 +1,16 @@
 """MLP trainer for tabular/embedding data."""
+
+import contextlib
+import gc
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
 import numpy.typing as npt
 import torch
 from epochlib.training import TorchTrainer
+from epochlib.training.utils import batch_to_device
 from torch import Tensor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -21,15 +26,83 @@ class MLPTrainer(TorchTrainer, Logger):
     Extends TorchTrainer with:
     - Custom scorer for validation metrics
     - Logging support
+    - Gradient clipping
     """
 
     scorer: Optional[Scorer] = None  # For exact validation metric computation
+
+    # Gradient clipping
+    max_grad_norm: Optional[float] = field(
+        default=None, init=True, repr=True, compare=False
+    )  # Max gradient norm for clipping (None = disabled)
 
     # For storing validation indices to pass to scorer
     _current_validation_indices: Optional[list[int]] = field(
         default=None, init=False, repr=False, compare=False
     )
     _current_epoch: int = field(default=0, init=False, repr=False, compare=False)
+
+    def train_one_epoch(
+        self,
+        dataloader: DataLoader[tuple[Tensor, ...]],
+        epoch: int,
+    ) -> float:
+        """Train the model for one epoch with gradient clipping support.
+
+        :param dataloader: Dataloader for the training data.
+        :param epoch: Epoch number.
+        :return: Average loss for the epoch.
+        """
+        losses = []
+        self.model.train()
+        pbar = tqdm(
+            dataloader,
+            unit="batch",
+            desc=f"Epoch {epoch} Train ({self.initialized_optimizer.param_groups[0]['lr']:0.8f})",
+        )
+        for batch in pbar:
+            X_batch, y_batch = batch
+
+            X_batch = batch_to_device(X_batch, self.x_tensor_type, self.device)
+            y_batch = batch_to_device(y_batch, self.y_tensor_type, self.device)
+
+            # Forward pass
+            with torch.autocast(self.device.type) if self.use_mixed_precision else contextlib.nullcontext():  # type: ignore[attr-defined]
+                y_pred = self.model(X_batch).squeeze(1)
+                loss = self.criterion(y_pred, y_batch)
+
+            # Backward pass
+            self.initialized_optimizer.zero_grad()
+            if self.use_mixed_precision:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+            # Apply gradient clipping if enabled
+            if self.max_grad_norm is not None:
+                if self.use_mixed_precision:
+                    # Unscale gradients before clipping
+                    self.scaler.unscale_(self.initialized_optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.max_grad_norm
+                )
+
+            # Optimizer step
+            if self.use_mixed_precision:
+                self.scaler.step(self.initialized_optimizer)
+                self.scaler.update()
+            else:
+                self.initialized_optimizer.step()
+
+            # Print tqdm
+            losses.append(loss.item())
+            pbar.set_postfix(loss=sum(losses) / len(losses))
+
+        # Remove the cuda cache
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        return sum(losses) / len(losses)
 
     def _training_loop(
         self,
@@ -69,7 +142,10 @@ class MLPTrainer(TorchTrainer, Logger):
             # Define verbose metrics if scorer has verbose mode
             if hasattr(self.scorer, "verbose") and self.scorer.verbose:
                 # Define old method metric (for comparison)
-                if hasattr(self.scorer, "log_old_metric") and self.scorer.log_old_metric:
+                if (
+                    hasattr(self.scorer, "log_old_metric")
+                    and self.scorer.log_old_metric
+                ):
                     self.external_define_metric(
                         self.wrap_log("Validation/weighted_r2"), self.wrap_log("epoch")
                     )
@@ -141,7 +217,9 @@ class MLPTrainer(TorchTrainer, Logger):
                 # Log validation loss
                 self.log_to_external(
                     message={
-                        self.wrap_log(f"Validation/Validation Loss{fold_no}"): val_losses[-1],
+                        self.wrap_log(
+                            f"Validation/Validation Loss{fold_no}"
+                        ): val_losses[-1],
                         self.wrap_log("epoch"): epoch,
                     },
                 )
@@ -165,7 +243,8 @@ class MLPTrainer(TorchTrainer, Logger):
                 if self._early_stopping():
                     self.log_to_external(
                         message={
-                            self.wrap_log(f"Epochs{fold_no}"): (epoch + 1) - self.patience
+                            self.wrap_log(f"Epochs{fold_no}"): (epoch + 1)
+                            - self.patience
                         }
                     )
                     break
@@ -174,10 +253,7 @@ class MLPTrainer(TorchTrainer, Logger):
             self.log_to_external(message={self.wrap_log(f"Epochs{fold_no}"): epoch + 1})
 
     def custom_train(
-        self,
-        x: npt.NDArray[np.float32],
-        y: npt.NDArray[np.float32],
-        **train_args: Any
+        self, x: npt.NDArray[np.float32], y: npt.NDArray[np.float32], **train_args: Any
     ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
         """Override custom_train to store validation indices for scorer access.
 
@@ -268,3 +344,31 @@ class MLPTrainer(TorchTrainer, Logger):
 
         # Always return the loss for early stopping and tracking
         return avg_loss
+
+    def _load_model(self, path: Path | None = None) -> None:
+        """Load the model from the model_directory folder."""
+        model_path = path if path is not None else self.get_model_path()
+
+        # Check if the model exists
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Model not found in {model_path}",
+            )
+
+        # Load model
+        self.log_to_terminal(
+            f"Loading model from {model_path}",
+        )
+        checkpoint = torch.load(model_path, weights_only=False)
+
+        # Load the weights from the checkpoint
+        if isinstance(checkpoint, nn.DataParallel):
+            model = checkpoint.module
+        else:
+            model = checkpoint
+
+        # Set the current model to the loaded model
+        if isinstance(self.model, nn.DataParallel):
+            self.model.module.load_state_dict(model.state_dict())
+        else:
+            self.model.load_state_dict(model.state_dict())

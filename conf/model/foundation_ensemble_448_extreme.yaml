@@ -47,9 +47,11 @@ train_sys:
         groups: "group_id"
         problem_type: "regression"
       fit_kwargs:
-        time_limit: 7200  # 2 hours for extreme quality
-        presets: "extreme_quality"
-        auto_stack: true  # Enable automatic stacking
+        time_limit: 1200  # 20 minutes
+        presets: "best_quality" # tabpfn does not work with this amount of features, so use best instead of extreme
+        num_bag_folds: 5
+        num_bag_sets: 1
+        num_stack_levels: 0
       predict_kwargs:
         as_pandas: false
 

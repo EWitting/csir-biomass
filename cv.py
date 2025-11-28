@@ -15,7 +15,7 @@ from omegaconf import DictConfig
 
 from src.config.cv_config import CVConfig
 from src.scoring.scorer import Scorer
-from src.setup.setup_data import setup_train_x_data, setup_train_y_data
+from src.setup.setup_data import setup_train_x_data, setup_train_y_data, setup_train_groups
 from src.setup.setup_pipeline import setup_pipeline
 from src.setup.setup_runtime_args import setup_train_args
 from src.setup.setup_wandb import setup_wandb
@@ -83,6 +83,11 @@ def run_cv_cfg(cfg: DictConfig) -> None:
     if not y_cache_exists:
         y = setup_train_y_data(cfg.data_path)
 
+    # Load groups if requested
+    groups = None
+    if cfg.get('use_groups', False):
+        groups = setup_train_groups(Path(cfg.data_path))
+
     # Instantiate scorer
     scorer = instantiate(cfg.scorer)
     scores: list[float] = []
@@ -97,7 +102,7 @@ def run_cv_cfg(cfg: DictConfig) -> None:
     oof_predictions = np.zeros(y.shape, dtype=np.float64)
 
     for fold_no, (train_indices, test_indices) in enumerate(instantiate(cfg.splitter).split(y)):
-        score, predictions = run_fold(fold_no, X, y, train_indices, test_indices, cfg, scorer, output_dir, cache_args)
+        score, predictions = run_fold(fold_no, X, y, train_indices, test_indices, cfg, scorer, output_dir, cache_args, groups)
         scores.append(score)
 
         # Save predictions
@@ -127,10 +132,11 @@ def run_fold(
     scorer: Scorer,
     output_dir: Path,
     cache_args: dict[str, Any],
+    groups: Any = None,  # noqa: ANN401
 ) -> tuple[float, Any]:
     """Run a single fold of the cross validation.
 
-    :param i: The fold number.
+    :param fold_no: The fold number.
     :param X: The input data.
     :param y: The labels.
     :param train_indices: The indices of the training data.
@@ -138,7 +144,8 @@ def run_fold(
     :param cfg: The config file.
     :param scorer: The scorer to use.
     :param output_dir: The output directory for the prediction plots.
-    :param processed_y: The processed labels.
+    :param cache_args: The cache arguments.
+    :param groups: Group labels for stratified bagging/CV.
     :return: The score of the fold and the predictions.
     """
     # Print section separator
@@ -155,6 +162,7 @@ def run_fold(
         test_indices=test_indices,
         fold=fold_no,
         save_model=cfg.save_folds,
+        groups=groups,
     )
     predictions, _ = model_pipeline.train(X, y, **train_args)
 
