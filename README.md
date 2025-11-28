@@ -14,7 +14,9 @@ Multi-output regression model predicting 5 biomass components from images.
 ```
 ├── conf/                    # Hydra configuration files
 │   ├── model/              # Model pipeline definitions
-│   │   └── biomass_base.yaml  # Current model: EfficientNet-B0
+│   │   ├── biomass_*.yaml         # EfficientNet-based models
+│   │   ├── foundation_*.yaml      # DINOv2/v3 foundation models
+│   │   └── foundation_mlae_dinov3.yaml  # MLAE fine-tuning
 │   ├── train.yaml          # Training config (single split)
 │   ├── cv.yaml             # Cross-validation config (5-fold)
 │   └── submit.yaml         # Inference config for Kaggle
@@ -27,15 +29,18 @@ Multi-output regression model predicting 5 biomass components from images.
 │   │   └── transformation/ # Image loading and preprocessing
 │   ├── scoring/            # WeightedR2 scorer
 │   └── setup/              # Data loading and W&B setup
+├── submission/             # Kaggle submission utilities
+│   ├── manage_datasets.py  # Upload code/models to Kaggle
+│   └── config/             # Dataset configurations (source.json, dependencies.json)
 ├── notebooks/              # EDA and experimentation
 ├── train.py                # Single train-val split
 ├── cv.py                   # K-fold cross-validation
 └── submit.py               # Generate Kaggle submissions
 ```
 
-## Setup
+## Quick Start
 
-### Installation
+### 1. Installation
 
 This project uses [UV](https://github.com/astral-sh/uv) for dependency management:
 
@@ -43,31 +48,57 @@ This project uses [UV](https://github.com/astral-sh/uv) for dependency managemen
 uv sync
 ```
 
-### Weights & Biases
+**Important**: Always run commands with `uv run`, not `python`:
+```bash
+uv run train      # NOT: python train.py
+uv run cv         # NOT: python cv.py
+```
 
-Project name: `csir-biomass`  
-Entity: `team-epoch-iv`
+### 2. Weights & Biases Setup
 
-Enable logging by modifying `conf/wandb/train.yaml` after initial setup is working.
+The codebase uses W&B for experiment tracking. You may need to configure this for your account:
 
-## Current Model
+1. Edit [src/setup/setup_wandb.py](src/setup/setup_wandb.py):
+   - Line 30: Change `project_name` if needed
+   - Line 39: Change `entity` to your W&B username or team name
 
-**Architecture**: EfficientNet-B0 (timm) → Global Avg Pool → Dropout(0.3) → Linear(5 outputs)
+2. Enable W&B logging in [conf/wandb/train.yaml](conf/wandb/train.yaml) after initial setup works
 
-**Key features**:
-- Image size: 224×224
-- ImageNet pre-trained backbone
-- Kornia augmentations (horizontal/vertical flips, TrivialAugment)
-- Huber loss with weighted R² scaling
-- Cosine LR scheduler with warmup
-- Mixed precision training
-- Test-time augmentation (TTA) with horizontal flip
+Current defaults:
+- Project: `csir-biomass`
+- Entity: `team-epoch-iv`
 
-See `conf/model/biomass_base.yaml` for full configuration.
+## Available Models
 
-## Usage
+The codebase includes several model approaches:
 
-### Training
+### 1. Standard Training from Scratch
+- **Config**: [conf/model/biomass_sliding_window_global.yaml](conf/model/biomass_sliding_window_global.yaml)
+- **Description**: EfficientNet trained from scratch with sliding window aggregation
+- **Best for**: Baseline experiments
+
+### 2. Foundation Models (Frozen Features)
+- **Configs**:
+  - [conf/model/foundation_ensemble_224_fast.yaml](conf/model/foundation_ensemble_224_fast.yaml)
+  - [conf/model/foundation_ensemble_384_best.yaml](conf/model/foundation_ensemble_384_best.yaml)
+  - [conf/model/foundation_ensemble_448_extreme.yaml](conf/model/foundation_ensemble_448_extreme.yaml)
+- **Description**: Frozen DINOv2/v3 features + AutoGluon tabular models
+- **Best for**: Quick experiments with strong baselines
+
+### 3. Foundation Models with Fine-Tuning (MLAE)
+- **Config**: [conf/model/foundation_mlae_dinov3.yaml](conf/model/foundation_mlae_dinov3.yaml)
+- **Description**: DINOv3 fine-tuned using Masked LoRA Experts (parameter-efficient)
+- **Best for**: State-of-the-art performance with efficient fine-tuning
+- **See**: [MLAE_README.md](MLAE_README.md) for detailed documentation
+
+### 4. Simple MLP Head
+- **Configs**: [conf/model/foundation_mlp.yaml](conf/model/foundation_mlp.yaml), [conf/model/foundation_realmlp.yaml](conf/model/foundation_realmlp.yaml)
+- **Description**: Frozen features + MLP regression head
+- **Best for**: Fast prototyping
+
+## Basic Usage
+
+### Running Training
 
 ```bash
 # Single train-val split (80-20)
@@ -76,69 +107,234 @@ uv run train
 # 5-fold cross-validation
 uv run cv
 
-# Override model config
-uv run train model=biomass_base
+# Use a specific model
+uv run train model=foundation_mlae_dinov3
+uv run cv model=foundation_ensemble_384_best
 ```
 
-### Generate Submission
-Test with `uv run submit` to ensure it works. (change the path in submit.yaml for local testing)
-Creates `submission.csv` in format required by Kaggle.
-Use `uv run submission/manage_datasets.py` to upload to Kaggle. Usually no dependency update needed when prompted, but to say yes to uploading source code.
-In Kaggle, open the notebook, refresh the dataset to get the latest version, and submit.
+### Changing Model Parameters
 
-### Model Selection
+Use Hydra command-line overrides:
 
-Models are defined in `conf/model/`. To use a different model:
-
-1. Create new config file: `conf/model/my_model.yaml`
-2. Run: `uv run train model=my_model`
-
-Or use Hydra overrides:
 ```bash
-uv run train model.train_sys.steps[0].batch_size=32
+# Change batch size
+uv run train model.train_sys.steps[0].batch_size=16
+
+# Change learning rate
+uv run train model.train_sys.steps[0].optimizer.lr=1e-4
+
+# Change image size
+uv run train model.train_sys.steps[0].image_size=384
 ```
 
-## Development Workflow
+### Kaggle Submission
+
+#### First-Time Setup
+
+1. **Configure Kaggle Datasets**: Run the interactive setup:
+   ```bash
+   uv run submission/manage_datasets.py
+   ```
+
+   You'll be prompted to configure:
+   - Source code dataset name and ID
+   - Dependencies dataset name and ID
+   - Your Kaggle API credentials (if not already configured)
+
+   **Note**: If you don't have access to the existing datasets, you'll need to create your own:
+   - Create a new Kaggle dataset for source code
+   - Create a new Kaggle dataset for dependencies
+   - Update `submission/config/source.json` and `submission/config/dependencies.json` with your dataset IDs
+
+2. **Test locally** (optional):
+   ```bash
+   # Edit conf/submit.yaml to point to local test data
+   uv run submit
+   ```
+   This creates `submission.csv` in the required format.
+
+#### Submitting to Kaggle
+
+1. **Upload code and models**:
+   ```bash
+   uv run submission/manage_datasets.py
+   ```
+   - When prompted about dependencies update: usually say **no**
+   - When prompted about uploading source code (includes trained models): say **yes**
+
+2. **Submit on Kaggle**:
+   - Open your Kaggle notebook
+   - Refresh the dataset to get the latest version
+   - Run the notebook to generate predictions
+   - Submit to the competition
+
+**Important Limitations**:
+- Saving/loading trained models is **not yet supported** for:
+  - DINOv3 with MLAE fine-tuning (HuggingFace models)
+  - AutoGluon ensemble models
+
+## Development Guide
+
+### Adding New Functionality
+
+#### Creating a New Model
+
+1. **Create a model configuration** in `conf/model/my_new_model.yaml`:
+
+```yaml
+# Most of the pipeline structure is inherited from conf/model/pipeline/default.yaml
+# You only need to specify what changes
+
+train_sys:
+  steps:
+    - _target_: src.modules.training.main_trainer.MainTrainer
+      model_name: "MyModel"
+      epochs: 100
+      batch_size: 16
+      model:
+        _target_: timm.create_model
+        model_name: efficientnet_b0
+        pretrained: true
+        num_classes: 5
+      criterion:
+        _target_: torch.nn.MSELoss
+      optimizer:
+        _target_: functools.partial
+        _args_:
+          - _target_: hydra.utils.get_class
+            path: torch.optim.Adam
+        lr: 1e-3
+```
+
+2. **Run your model**:
+```bash
+uv run train model=my_new_model
+```
+
+#### Creating Custom Training Logic
+
+1. **Create a new trainer class** in `src/modules/training/`:
+
+```python
+from dataclasses import dataclass
+from src.modules.training.main_trainer import MainTrainer
+
+@dataclass
+class MyCustomTrainer(MainTrainer):
+    """Custom trainer with special logic."""
+
+    def train_epoch(self, ...):
+        # Your custom training logic
+        pass
+```
+
+2. **Reference it in your config**:
+```yaml
+train_sys:
+  steps:
+    - _target_: src.modules.training.my_custom_trainer.MyCustomTrainer
+      # ... parameters
+```
+
+#### Adding Preprocessing Steps
+
+Add transformation blocks to `x_sys` (for input images) or `y_sys` (for labels):
+
+```yaml
+x_sys:
+  steps:
+    - _target_: src.modules.transformation.image_loader.ImageLoader
+      # ... parameters
+    - _target_: src.modules.transformation.my_preprocessor.MyPreprocessor
+      # ... parameters
+```
 
 ### Configuration Philosophy
 
-This codebase uses **Hydra instantiate** to minimize Python boilerplate. Define objects directly in YAML configs using `_target_`:
+This codebase follows a **config-driven** approach using Hydra:
 
-```yaml
-# Good: Direct instantiation
-criterion:
-  _target_: torch.nn.HuberLoss
-  delta: 1.0
+**DO**: Define classes that can be instantiated directly from config
+```python
+@dataclass
+class MyModel:
+    loss: nn.Module  # Instantiated from config
+    learning_rate: float
+```
 
-# Bad: String parsing in Python
-criterion: "huber"  # Then parse in __init__
+**DON'T**: Use string-based configuration with manual parsing
+```python
+class MyModel:
+    def __init__(self, loss: str):  # ❌ Manual parsing needed
+        if loss == "mse":
+            self.loss = nn.MSELoss()
+        # ...
 ```
 
 ### Pipeline Structure
 
-Models follow a 5-stage pipeline (see `conf/model/pipeline/default.yaml`):
+All models follow a 5-stage pipeline (inherited from `conf/model/pipeline/default.yaml`):
 
-1. **x_sys**: Image loading and preprocessing
-2. **y_sys**: Target transformations (currently empty)
-3. **train_sys**: Model training (PyTorch trainer)
-4. **pred_sys**: Post-process predictions (currently empty)
-5. **label_sys**: Transform labels for final scoring (currently empty)
-
+1. **x_sys**: Image loading and preprocessing (e.g., resize, normalize)
+2. **y_sys**: Target transformations (usually empty)
+3. **train_sys**: Model training (your PyTorch trainer goes here)
+4. **pred_sys**: Post-process predictions (e.g., clipping, scaling)
+5. **label_sys**: Transform labels for final scoring (usually empty)
 
 ### Logging
 
-When inheriting from `VerboseTrainingBlock` or `VerboseTransformationBlock`:
+When extending `VerboseTrainingBlock` or `VerboseTransformationBlock`:
 
 ```python
-self.log_to_terminal("Message")
-self.log_to_debug("Debug info")
-self.log_to_external({"metric": value})  # W&B logging
+self.log_to_terminal("Message for console")
+self.log_to_debug("Debug information")
+self.log_to_warning("Warning message")
+self.log_to_external({"metric_name": value})  # W&B logging
 ```
 
 ### Caching
 
-Preprocessing results (`x_sys`, `y_sys`) are automatically cached in `data/processed/`. Delete cache to force recomputation.
-loader.py**: Loads and resizes images from paths
----
+- Preprocessing results (`x_sys`, `y_sys`) are **automatically cached** in `data/processed/`
+- Cache is based on configuration hash
+- Delete cache folder to force recomputation
+- Speeds up experimentation when only changing model hyperparameters
 
-Built with [epochlib](https://github.com/TeamEpochGithub/epochlib)
+### Data Folder Structure
+
+```
+data/
+├── raw/              # Original competition data (DO NOT MODIFY)
+│   ├── train.csv
+│   ├── test.csv
+│   └── images/
+└── processed/        # Auto-generated cache (safe to delete)
+```
+
+**Rule**: Keep `data/raw/` exactly as downloaded from Kaggle (after unzipping).
+
+### Dependencies
+
+**Adding new packages**:
+```bash
+uv add package-name          # Adds to pyproject.toml and installs
+uv add --dev package-name    # Development dependency
+```
+
+**Updating dependencies**:
+```bash
+uv sync                      # Sync environment with pyproject.toml
+```
+
+**DO NOT**: Manually edit `pyproject.toml` to add packages (except for PyTorch GPU sources).
+
+### Common Gotchas
+
+1. **Always use `uv run`**: Don't use bare `python` commands
+2. **No unicode characters**: Python files must use ASCII encoding only (no emojis)
+3. **Use dataclasses**: Minimize boilerplate with `@dataclass` decorator
+4. **Trust the config**: Let Hydra instantiate objects instead of manual factory patterns
+
+## Additional Documentation
+
+- **[epochlib docs](https://github.com/TeamEpochGithub/epochlib)**: Framework documentation
+
+---
