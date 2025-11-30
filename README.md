@@ -133,7 +133,7 @@ uv run train model.train_sys.steps[0].image_size=384
 
 1. **Configure Kaggle Datasets**: Run the interactive setup:
    ```bash
-   uv run submission/manage_datasets.py
+   uv run python submission/manage_datasets.py --help
    ```
 
    You'll be prompted to configure:
@@ -155,23 +155,60 @@ uv run train model.train_sys.steps[0].image_size=384
 
 #### Submitting to Kaggle
 
-1. **Upload code and models**:
-   ```bash
-   uv run submission/manage_datasets.py
-   ```
-   - When prompted about dependencies update: usually say **no**
-   - When prompted about uploading source code (includes trained models): say **yes**
+**Finding Your Model Hash**:
+- During training, the model hash is printed in the logs
+- When testing `submit.py` locally (with local paths in `conf/submit.yaml`), the hash is shown during model loading
+- Model files are saved as `tm/{hash}.pt` (or `tm/{hash}_fold_{n}.pt` for cross-validation)
+- **Hash filtering uses `startswith()`**: Providing a hash prefix will match ALL files starting with that hash (e.g., all folds of a model)
 
-2. **Submit on Kaggle**:
-   - Open your Kaggle notebook
-   - Refresh the dataset to get the latest version
-   - Run the notebook to generate predictions
-   - Submit to the competition
+**Upload Dependencies** (first time or when packages change):
+```bash
+uv run python submission/manage_datasets.py --dependencies
+```
+This compiles `requirements.txt` from `pyproject.toml` and uploads Python packages.
 
-**Important Limitations**:
-- Saving/loading trained models is **not yet supported** for:
-  - DINOv3 with MLAE fine-tuning (HuggingFace models)
-  - AutoGluon ensemble models
+**Managing Package Versions**:
+- Edit [submission/config/package_config.json](submission/config/package_config.json) to control package uploads:
+  - `excluded_packages`: Packages to exclude from upload (already on Kaggle)
+  - `forced_packages`: Packages to force-include with specific versions (overrides Kaggle defaults)
+  - Example: `"forced_packages": ["transformers>=4.57.0"]` ensures newer transformers version
+  - `auto_exclude_kaggle_packages`: Auto-exclude all packages from `kaggle_container_packages.txt`
+
+**Upload Source Code and Models**:
+
+```bash
+# Upload ALL trained models in tm/ folder
+uv run python submission/manage_datasets.py --source
+
+# Upload SPECIFIC model(s) by hash (recommended)
+uv run python submission/manage_datasets.py --source --model-hash abc123def456
+
+# Upload multiple specific models
+uv run python submission/manage_datasets.py --source --model-hash abc123 def456 xyz789
+```
+
+**What gets uploaded with `--source`**:
+- `src/`, `conf/`, `submit.py` (code)
+- `tm/hf_models/` (HuggingFace model configs for offline use - always included)
+- `tm/{hash}.pt` files (trained model weights):
+  - Without `--model-hash`: **ALL models** in `tm/` folder
+  - With `--model-hash`: **ONLY specified models**
+
+**Upload Both** (dependencies + source):
+```bash
+uv run python submission/manage_datasets.py --dependencies --source --model-hash abc123
+```
+
+**Submit on Kaggle**:
+- Open your Kaggle notebook
+- Refresh the dataset to get the latest version
+- Run the notebook to generate predictions
+- Submit to the competition
+
+**HuggingFace Models (DINOv3 MLAE)**:
+- HuggingFace model configs are automatically saved to `tm/hf_models/` on first run with internet
+- These configs are always included in uploads (small files ~few KB)
+- Allows models to work offline on Kaggle without internet access
 
 ## Development Guide
 

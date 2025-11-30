@@ -15,7 +15,7 @@ train_sys:
   steps:
     - _target_: src.modules.training.mlae_trainer.MLAETrainer
       model_name: "BiomassMLAE_DINOv3"
-      n_folds: 0  # 0 for train full
+      n_folds: 5  # 0 for train full
       epochs: 100  # Set to 2 for testing (1 epoch causes early stopping issues)
       patience: 50
       batch_size: 5  # Small batch for testing
@@ -75,10 +75,10 @@ train_sys:
         masking_type: "stochastic"
 
       criterion:
-        _target_: src.modules.training.losses.WeightedLoss
+        _target_: src.modules.training.losses.GlobalWeightedLoss
         base_loss:
-          _target_: src.modules.training.losses.StableLogCoshLoss
-        weights: [1.0, 1.0, 1.0, 0.0, 0.0]  # Only base components
+          _target_: torch.nn.MSELoss
+        weights: [0.1, 0.1, 0.1, 0.2, 0.5]  # [Dry_Clover_g, Dry_Dead_g, Dry_Green_g, GDM_g, Dry_Total_g]
         scale_by_variance: true
         variance_momentum: 0.1
 

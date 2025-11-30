@@ -6,13 +6,16 @@ and applies stochastic masking during training for diversity.
 
 Based on: "Masked LoRA Experts for Efficient Vision Transformer Fine-tuning"
 """
+import os
 import torch
 import torch.nn as nn
+from pathlib import Path
 from transformers import AutoModel, AutoImageProcessor
 from typing import Optional, Literal
 import math
 
 from src.modules.training.models.mlae import MLAE_Linear
+from src.utils.logger import logger
 
 
 class DINOv3_MLAE_Model(nn.Module):
@@ -76,9 +79,45 @@ class DINOv3_MLAE_Model(nn.Module):
         self.masking_strategy = masking_strategy
         self.masking_type = masking_type
 
-        # Load DINOv3 model
-        self.backbone = AutoModel.from_pretrained(model_name)
-        self.processor = AutoImageProcessor.from_pretrained(model_name)
+        # Load DINOv3 model, handling internet connectivity issues
+        # Local path where we save HF configs for offline use (Kaggle)
+        local_hf_path = Path("tm") / "hf_models" / model_name.replace("/", "-")
+
+        try:
+            # Try loading from local saved configs first (Kaggle offline)
+            if local_hf_path.exists():
+                logger.info(f"Loading DINOv3 from local path: {local_hf_path}")
+                self.backbone = AutoModel.from_pretrained(local_hf_path)
+                self.processor = AutoImageProcessor.from_pretrained(local_hf_path)
+            else:
+                # Download from HuggingFace (training with internet)
+                logger.info(f"Downloading DINOv3 from HuggingFace: {model_name}")
+                self.backbone = AutoModel.from_pretrained(model_name)
+                self.processor = AutoImageProcessor.from_pretrained(model_name)
+
+                # Auto-save configs for future offline use
+                logger.info(f"Saving HF configs to {local_hf_path} for offline use")
+                local_hf_path.mkdir(parents=True, exist_ok=True)
+                self.backbone.save_pretrained(local_hf_path)
+                self.processor.save_pretrained(local_hf_path)
+
+        except Exception as e:
+            # Catch errors from HuggingFace when internet is unavailable (e.g., on Kaggle)
+            logger.warning(
+                f"Failed to load DINOv3 model from HuggingFace: {e}. "
+                "Attempting to load from local files only..."
+            )
+            # Final fallback: try loading from HF cache with local_files_only
+            try:
+                self.backbone = AutoModel.from_pretrained(model_name, local_files_only=True)
+                self.processor = AutoImageProcessor.from_pretrained(model_name, local_files_only=True)
+                logger.info("Successfully loaded from HuggingFace cache")
+            except Exception as e2:
+                logger.error(
+                    f"Failed to load model architecture locally: {e2}. "
+                    f"Make sure configs are saved in {local_hf_path} or HuggingFace cache."
+                )
+                raise
 
         # Get embedding dimension
         self.hidden_dim = self.backbone.config.hidden_size

@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import shutil
@@ -8,11 +9,6 @@ from src.utils.logger import print_section_separator
 DEPENDENCIES_SAVE_PATH = Path('submission/dependencies')
 SOURCE_CODE_SAVE_PATH = Path('submission/source-code')
 SOURCE_CODE_PATH = Path('./')
-
-# You can specify tm hashes here to exclude them from the source code dataset.
-TM_HASH = [
-    "194dda279928bc96fe069d885d7f2675_0.pt",
-]
 
 
 def verify_config():
@@ -77,14 +73,28 @@ def update_dependencies():
         raise RuntimeError('Failed to compile requirements.txt from pyproject.toml')
     print('✓ requirements.txt compiled successfully')
 
-    # Load excluded packages configuration
-    excluded_config_path = Path("./submission/config/excluded_packages.json")
-    if excluded_config_path.exists():
-        excluded_config = json.load(open(excluded_config_path))
-        excluded_packages = excluded_config.get("excluded_packages", [])
-        auto_exclude_kaggle = excluded_config.get("auto_exclude_kaggle_packages", False)
-        
+    # Load package configuration (both excluded and forced packages)
+    package_config_path = Path("./submission/config/package_config.json")
+    excluded_packages_path = Path("./submission/config/excluded_packages.json")
+
+    # Support both old and new config file names
+    if package_config_path.exists():
+        config_path = package_config_path
+    elif excluded_packages_path.exists():
+        config_path = excluded_packages_path
+        print('⚠️  WARNING: Using deprecated excluded_packages.json. Please rename to package_config.json')
+    else:
+        config_path = None
+
+    if config_path:
+        package_config = json.load(open(config_path))
+        excluded_packages = package_config.get("excluded_packages", [])
+        forced_packages = package_config.get("forced_packages", [])
+        auto_exclude_kaggle = package_config.get("auto_exclude_kaggle_packages", False)
+
         print(f'Manually excluded packages: {", ".join(excluded_packages)}')
+        if forced_packages:
+            print(f'Forced packages (will override Kaggle defaults): {", ".join(forced_packages)}')
         
         # Load Kaggle container packages if auto-exclude is enabled
         if auto_exclude_kaggle:
@@ -117,7 +127,8 @@ def update_dependencies():
                 print('  Download it by running "pip freeze > kaggle_container_packages.txt" on Kaggle')
     else:
         excluded_packages = []
-        print('No excluded packages configuration found.')
+        forced_packages = []
+        print('No package configuration found.')
 
     if os.path.exists(DEPENDENCIES_SAVE_PATH):
         print('Cleaning the dependencies folder')
@@ -135,6 +146,13 @@ def update_dependencies():
     with open(SOURCE_CODE_PATH / 'requirements.txt', 'r') as f:
         lines = f.readlines()
     with open(DEPENDENCIES_SAVE_PATH / 'requirements.txt', 'w') as f:
+        # First, extract package names from forced_packages to skip them from requirements
+        forced_pkg_names = []
+        for forced_pkg in forced_packages:
+            # Extract package name from version specifier (e.g., "transformers>=4.50.0" -> "transformers")
+            pkg_name = forced_pkg.split('==')[0].split('>=')[0].split('<=')[0].split('~=')[0].split('!=')[0].split('>')[0].split('<')[0].strip()
+            forced_pkg_names.append(pkg_name.lower())
+
         for line in lines:
             line_stripped = line.strip().lower()
             # Skip -e lines
@@ -153,8 +171,22 @@ def update_dependencies():
                     if len(line_stripped) == pkg_len or line_stripped[pkg_len] in ['=', '>', '<', '!', ' ', '\n']:
                         skip_line = True
                         break
+            # Skip packages that will be force-included with specific versions
+            for forced_pkg_name in forced_pkg_names:
+                if line_stripped.startswith(forced_pkg_name):
+                    pkg_len = len(forced_pkg_name)
+                    if len(line_stripped) == pkg_len or line_stripped[pkg_len] in ['=', '>', '<', '!', ' ', '\n']:
+                        skip_line = True
+                        break
             if not skip_line:
                 f.write(line)
+
+        # Append forced packages at the end
+        if forced_packages:
+            f.write('\n# Forced package versions (from package_config.json)\n')
+            for forced_pkg in forced_packages:
+                f.write(f'{forced_pkg}\n')
+            print(f'  Added {len(forced_packages)} forced package(s) to requirements.txt')
 
     if not os.path.exists(DEPENDENCIES_SAVE_PATH / 'tmp'):
         os.makedirs(DEPENDENCIES_SAVE_PATH / 'tmp')
@@ -223,19 +255,29 @@ def update_dependencies():
                     # Normalize both to lowercase and replace _ with - for comparison
                     normalized_filename = filename.lower().replace('_', '-')
                     normalized_pkg = excluded_pkg.lower().replace('_', '-')
-                    
+
                     # Check if filename starts with package name followed by '-' and a digit (version)
                     # This prevents 'torch' from matching 'torch-ema'
                     if normalized_filename.startswith(normalized_pkg + '-'):
                         # Verify the character after the package name and hyphen is a digit (version number)
                         char_after_pkg = normalized_filename[len(normalized_pkg) + 1:len(normalized_pkg) + 2]
                         if char_after_pkg and char_after_pkg.isdigit():
+                            # Check if this package is in forced_packages - if so, don't remove it
+                            pkg_name = filename.split('-')[0]
+                            pkg_name_normalized = pkg_name.lower().replace('_', '-')
+                            is_forced = any(
+                                pkg_name_normalized == forced_pkg.split('==')[0].split('>=')[0].split('<=')[0].split('~=')[0].split('!=')[0].split('>')[0].split('<')[0].strip().lower().replace('_', '-')
+                                for forced_pkg in forced_packages
+                            )
+                            if is_forced:
+                                print(f'  Keeping forced package: {filename}')
+                                continue
+
                             wheel_path = tmp_dir / filename
                             os.remove(wheel_path)
                             print(f'  Removed: {filename}')
                             removed_count += 1
                             # Track the actual package name from the wheel
-                            pkg_name = filename.split('-')[0]
                             additional_removed_packages.append(pkg_name)
                             break
             print(f'Total wheels removed: {removed_count}')
@@ -309,28 +351,56 @@ def update_dependencies():
     if result != 0:
         raise RuntimeError('Failed to upload dependencies dataset to Kaggle')
 
+    # Clean up the zip file after successful upload
+    dependencies_zip = DEPENDENCIES_SAVE_PATH / 'dependencies.no_unzip'
+    if dependencies_zip.exists():
+        os.remove(dependencies_zip)
+        print(f'Cleaned up {dependencies_zip}')
 
-def update_source():
-    """Update the source code dataset."""
+
+def update_source(model_hashes=None):
+    """Update the source code dataset.
+
+    Args:
+        model_hashes: List of model hashes to include from tm/ directory.
+                     If None or empty, includes all models.
+    """
     if os.path.exists(SOURCE_CODE_SAVE_PATH):
         shutil.rmtree(SOURCE_CODE_SAVE_PATH)
     os.mkdir(SOURCE_CODE_SAVE_PATH)
 
     # Copy Source Code to submission/source_code
     relevant_files = ['src/', 'conf/', 'submit.py']
-    if len(TM_HASH) == 0:
-        relevant_files.append('tm/')
+
+    # Always include HuggingFace model configs (small config files for offline use)
+    if os.path.exists(SOURCE_CODE_PATH / 'tm' / 'hf_models'):
+        relevant_files.append('tm/hf_models/')
+        print('Including HuggingFace model configs from tm/hf_models/')
+
+    # Handle trained model files based on hash filter
+    if model_hashes is None or len(model_hashes) == 0:
+        # Include all model files (excluding hf_models which is already added)
+        print('Including all trained models from tm/')
+        tm_contents = os.listdir(SOURCE_CODE_PATH / 'tm')
+        for item in tm_contents:
+            if item != 'hf_models':  # Skip hf_models as it's already added
+                relevant_files.append(f'tm/{item}')
     else:
-        for hash in TM_HASH:
+        # Include only specified hashes
+        print(f'Including specific model hashes: {", ".join(model_hashes)}')
+        for hash in model_hashes:
             found_one = False
-            tm = os.listdir(SOURCE_CODE_PATH / 'tm')
-            for file in tm:
+            tm_contents = os.listdir(SOURCE_CODE_PATH / 'tm')
+            for file in tm_contents:
+                if file == 'hf_models':  # Skip hf_models directory
+                    continue
                 if file.startswith(hash):
                     found_one = True
                     relevant_files.append('tm/' + file)
+                    print(f'  Found: tm/{file}')
             if not found_one:
-                print(f'No files found with hash: {hash}')
-                exit(1)
+                print(f'  Warning: No files found with hash: {hash}')
+                # Don't exit, just warn - user might want to continue anyway
 
     # Exclude __pycache__ from copying
     exluded_files = ['__pycache__']
@@ -364,21 +434,102 @@ def update_source():
     if result != 0:
         raise RuntimeError('Failed to upload source code dataset to Kaggle')
 
+    # Clean up the zip file after successful upload
+    source_zip = SOURCE_CODE_SAVE_PATH / 'source-code.zip'
+    if source_zip.exists():
+        os.remove(source_zip)
+        print(f'Cleaned up {source_zip}')
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Manage Kaggle datasets for competition submission',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Upload dependencies only (first time or when packages change)
+  python submission/manage_datasets.py --dependencies
+
+  # Upload source code with ALL models
+  python submission/manage_datasets.py --source
+
+  # Upload source code with specific model hash(es)
+  python submission/manage_datasets.py --source --model-hash abc123
+  python submission/manage_datasets.py --source --model-hash abc123 def456
+
+  # Upload both dependencies and source code
+  python submission/manage_datasets.py --dependencies --source --model-hash abc123
+
+Note:
+  - Source code upload includes: src/, conf/, submit.py, trained models
+  - tm/hf_models/ (HuggingFace configs) are ALWAYS included with --source
+  - Without --model-hash, ALL models in tm/ are uploaded
+  - With --model-hash, ONLY files starting with the hash are uploaded
+  - Hash filtering uses startswith() - one hash matches all folds/checkpoints
+  - Find model hash in training logs or during local submit.py testing
+  - Example: --model-hash abc123 uploads abc123.pt, abc123_fold_0.pt, etc.
+        """
+    )
+    parser.add_argument(
+        '--dependencies',
+        action='store_true',
+        help='Update and upload dependencies dataset (requirements.txt and wheels)'
+    )
+    parser.add_argument(
+        '--source',
+        action='store_true',
+        help='Update and upload source code dataset (includes trained models)'
+    )
+    parser.add_argument(
+        '--model-hash', '--tm-hash',
+        dest='model_hash',
+        nargs='+',
+        help='Specific model hash(es) to include from tm/ directory. '
+             'Only used with --source. If not specified, ALL models are uploaded. '
+             'tm/hf_models/ is always included regardless of this flag.'
+    )
+    return parser.parse_args()
+
 
 def manage_datasets():
-    # Verify the config
+    """Main function to manage dataset uploads."""
+    args = parse_args()
+
+    # Check if at least one action flag is provided
+    if not args.dependencies and not args.source:
+        print("\nERROR: You must specify what to upload using flags:")
+        print("  --dependencies    Update and upload Python dependencies")
+        print("  --source          Update and upload source code (includes trained models)")
+        print("\nExamples:")
+        print("  python submission/manage_datasets.py --dependencies")
+        print("  python submission/manage_datasets.py --source")
+        print("  python submission/manage_datasets.py --source --model-hash abc123")
+        print("  python submission/manage_datasets.py --dependencies --source")
+        print("\nFor more help:")
+        print("  python submission/manage_datasets.py --help")
+        print()
+        exit(1)
+
+    # Verify the config (Kaggle API setup, dataset IDs)
     verify_config()
 
-    # Update dependencies
-    update_dep = input("Would you like to update the dependencies? (requirements.txt will be auto-compiled from pyproject.toml) (y/n): ").lower()
-
-    if update_dep == "y":
+    # Update dependencies if requested
+    if args.dependencies:
+        print_section_separator("Updating Dependencies")
+        print("This will compile requirements.txt from pyproject.toml and upload Python packages.")
         update_dependencies()
 
-    # Update the dataset
-    update_s = input("Would you like to update the source code? (y/n): ").lower()
-    if update_s == "y":
-        update_source()
+    # Update source code if requested
+    if args.source:
+        print_section_separator("Updating Source Code")
+        if args.model_hash:
+            print(f"Uploading source code with specific model hash(es): {', '.join(args.model_hash)}")
+        else:
+            print("WARNING: No --model-hash specified. ALL models in tm/ will be uploaded!")
+        print("Source code includes: src/, conf/, submit.py, tm/hf_models/, and trained models")
+        print()
+        update_source(model_hashes=args.model_hash)
 
 
 if __name__ == "__main__":

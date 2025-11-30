@@ -15,7 +15,7 @@ train_sys:
   steps:
     - _target_: src.modules.training.main_trainer.MainTrainer
       model_name: "BiomassEfficientNetB0SlidingWindowGlobal"
-      n_folds: 0  # Used during submission only, 0 for doing inference with the train full model, 5 e.g. for fold ensemble.
+      n_folds: 5  # Used during submission only, 0 for doing inference with the train full model, 5 e.g. for fold ensemble.
       epochs: 100
       patience: 50
       batch_size: 16
@@ -43,10 +43,10 @@ train_sys:
           _target_: torch.nn.ReLU
       
       criterion:
-        _target_: src.modules.training.losses.GlobalWeightedLoss
+        _target_: src.modules.training.losses.WeightedLoss
         base_loss:
-          _target_: torch.nn.MSELoss
-        weights: [0.1, 0.1, 0.1, 0.2, 0.5]  # [Dry_Clover_g, Dry_Dead_g, Dry_Green_g, GDM_g, Dry_Total_g]
+          _target_: src.modules.training.losses.StableLogCoshLoss
+        weights: [1.0,1.0,1.0,0,0]  # [Dry_Clover_g, Dry_Dead_g, Dry_Green_g, GDM_g, Dry_Total_g]
         scale_by_variance: true  # Scale by 1/std² to align gradient descent with R² optimization
         variance_momentum: 0.1  # EWMA momentum (0.1 = 10% new batch, 90% history)
       

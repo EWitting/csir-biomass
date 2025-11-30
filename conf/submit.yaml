@@ -1,7 +1,7 @@
 defaults:
   - base_submit
   - hydra/logging
-  - model: biomass_sliding_window # Add models or ensembles
+  - model: foundation_mlae_dinov3 # Add models or ensembles
 
 # Use this when uploading to Kaggle
 
